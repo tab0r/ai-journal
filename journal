@@ -4,6 +4,7 @@
 import argparse
 import os
 import re
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -449,6 +450,63 @@ def cmd_resolve(args):
     print(f"  {path}")
 
 
+def cmd_sync(args):
+    """Commit and push journal data to the private repo."""
+    if not (DATA_DIR / ".git").exists():
+        print(f"No git repo in {DATA_DIR}. Initialize one first:")
+        print(f"  cd {DATA_DIR} && git init && gh repo create ai-journal-data --private --source=. --push")
+        return
+
+    def run(cmd):
+        return subprocess.run(cmd, cwd=DATA_DIR, capture_output=True, text=True)
+
+    # Check for changes
+    result = run(["git", "status", "--porcelain"])
+    if not result.stdout.strip():
+        print(c(dim, "  Nothing to sync - journal is up to date."))
+        return
+
+    # Stage everything
+    run(["git", "add", "-A"])
+
+    # Build a commit message from what changed
+    diff = run(["git", "diff", "--cached", "--stat"])
+    changed_files = [line.strip().split("|")[0].strip() for line in diff.stdout.splitlines() if "|" in line]
+
+    # Summarize: count new/modified entries by type
+    summary_parts = []
+    for f in changed_files:
+        for t in ENTRY_TYPES:
+            if f"/{t}s/" in f:
+                summary_parts.append(t)
+                break
+
+    if summary_parts:
+        from collections import Counter
+        counts = Counter(summary_parts)
+        msg = "journal: " + ", ".join(f"{v} {k}{'s' if v > 1 else ''}" for k, v in counts.items())
+    else:
+        msg = "journal: update entries"
+
+    if args.message:
+        msg = args.message
+
+    result = run(["git", "commit", "-m", msg])
+    if result.returncode != 0:
+        print(f"Commit failed: {result.stderr}")
+        return
+
+    print(f"  {c(green, 'Committed')}: {msg}")
+
+    # Push
+    result = run(["git", "push"])
+    if result.returncode != 0:
+        print(f"  Push failed: {result.stderr}")
+        return
+
+    print(f"  {c(green, 'Pushed')} to remote.")
+
+
 # --- Main ---
 
 def main():
@@ -494,6 +552,11 @@ def main():
     p_resolve.add_argument("path", help="Stuck entry path or partial name")
     p_resolve.add_argument("-s", "--solution", help="How it was resolved")
     p_resolve.set_defaults(func=cmd_resolve)
+
+    # sync
+    p_sync = sub.add_parser("sync", help="Commit and push journal data")
+    p_sync.add_argument("-m", "--message", help="Custom commit message")
+    p_sync.set_defaults(func=cmd_sync)
 
     args = parser.parse_args()
     if not args.command:
