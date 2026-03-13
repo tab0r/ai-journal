@@ -30,7 +30,7 @@ The **stuck** entry is the key innovation. When you hit a wall, the AI writes do
 
 ```bash
 # Clone and set up
-git clone https://github.com/YOUR_USER/ai-journal.git ~/Code/ai-journal
+git clone https://github.com/tab0r/ai-journal.git ~/Code/ai-journal
 ln -s ~/Code/ai-journal/journal ~/.local/bin/journal
 
 # See what's going on
