@@ -450,6 +450,83 @@ def cmd_resolve(args):
     print(f"  {path}")
 
 
+def cmd_index(args):
+    """Build or rebuild the topic index from entry tags."""
+    entries = find_entries()
+
+    if not entries:
+        print("No entries to index.")
+        return
+
+    # Build topic -> entries mapping
+    topic_map = {}
+    for e in entries:
+        tags = e["meta"].get("tags", [])
+        if isinstance(tags, str):
+            tags = [t.strip() for t in tags.split(",") if t.strip()]
+        for tag in tags:
+            tag_lower = tag.lower()
+            topic_map.setdefault(tag_lower, []).append(e)
+
+    if not topic_map:
+        print("No tags found in any entries. Add tags to entry frontmatter to build the index.")
+        return
+
+    # Build the index markdown
+    lines = [
+        "# Index",
+        "",
+        f"*Auto-generated on {datetime.now().strftime('%Y-%m-%d %H:%M')} "
+        f"— {len(topic_map)} topics across {len(entries)} entries.*",
+        "",
+        "---",
+        "",
+    ]
+
+    # Alphabetical letter headings
+    sorted_topics = sorted(topic_map.keys())
+    current_letter = None
+
+    for topic in sorted_topics:
+        first = topic[0].upper()
+        if first != current_letter:
+            current_letter = first
+            lines.append(f"## {current_letter}")
+            lines.append("")
+
+        topic_entries = topic_map[topic]
+        lines.append(f"### {topic}")
+        lines.append("")
+        for e in sorted(topic_entries, key=lambda x: x["meta"].get("created", "")):
+            meta = e["meta"]
+            title = meta.get("title", e["path"].stem)
+            entry_type = meta.get("type", "?")
+            project = e["project"]
+            status = meta.get("status", "")
+            date = meta.get("created", "")[:10]
+
+            # Relative link from data/ root
+            rel_path = e["path"].relative_to(DATA_DIR)
+
+            status_badge = ""
+            if entry_type == "stuck":
+                status_badge = " `OPEN`" if status == "open" else " `resolved`"
+
+            lines.append(
+                f"- [{title}]({rel_path}) "
+                f"— *{entry_type}* in **{project}**{status_badge} "
+                f"({date})"
+            )
+        lines.append("")
+
+    # Write index file
+    index_path = DATA_DIR / "INDEX.md"
+    index_path.write_text("\n".join(lines) + "\n")
+
+    print(f"  {c(green, 'Index rebuilt')}: {len(topic_map)} topics, {len(entries)} entries")
+    print(f"  {c(dim, str(index_path))}")
+
+
 def cmd_sync(args):
     """Commit and push journal data to the private repo."""
     if not (DATA_DIR / ".git").exists():
@@ -552,6 +629,9 @@ def main():
     p_resolve.add_argument("path", help="Stuck entry path or partial name")
     p_resolve.add_argument("-s", "--solution", help="How it was resolved")
     p_resolve.set_defaults(func=cmd_resolve)
+
+    # index
+    sub.add_parser("index", help="Rebuild the topic index from tags").set_defaults(func=cmd_index)
 
     # sync
     p_sync = sub.add_parser("sync", help="Commit and push journal data")
