@@ -242,6 +242,24 @@ assert_file_contains "index shows stuck status badge" "$TEST_DATA/INDEX.md" "\`r
 
 echo ""
 
+# --- graph ---
+
+echo "graph:"
+
+# Add related links between entries
+sed -i 's/tags: \[parsing, regex\]/tags: [parsing, regex]\nrelated: [bug-in-parser]/' "$TEST_DATA/projects/testproj/decisions/"*use-regex*.md
+sed -i 's/tags: \[parsing, performance\]/tags: [parsing, performance]\nrelated: [use-regex-over-peg]/' "$TEST_DATA/projects/testproj/insights/"*peg-grammars*.md
+
+$JOURNAL graph >/dev/null
+assert_file_exists "creates GRAPH.md" "$TEST_DATA/GRAPH.md"
+assert_file_contains "graph has mermaid block" "$TEST_DATA/GRAPH.md" '```mermaid'
+assert_file_contains "graph has entry nodes" "$TEST_DATA/GRAPH.md" "Bug in parser"
+assert_file_contains "graph has explicit edges" "$TEST_DATA/GRAPH.md" " --- "
+assert_file_contains "graph has tag edges" "$TEST_DATA/GRAPH.md" " -.- "
+assert_file_contains "graph has legend" "$TEST_DATA/GRAPH.md" "## Legend"
+
+echo ""
+
 # --- scrub ---
 
 echo "scrub:"

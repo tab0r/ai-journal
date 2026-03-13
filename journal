@@ -634,6 +634,163 @@ def cmd_index(args):
     print(f"  {c(dim, str(index_path))}")
 
 
+def entry_id(entry):
+    """Short ID for an entry: project/type/filename-stem."""
+    return f"{entry['project']}/{entry['meta'].get('type', '?')}/{entry['path'].stem}"
+
+
+def entry_short_id(entry):
+    """Even shorter: just the filename stem."""
+    return entry["path"].stem
+
+
+def resolve_related(entries):
+    """Build a map of entry -> [related entries] from the 'related' frontmatter field.
+
+    The 'related' field contains partial filename matches, resolved against all entries.
+    """
+    # Build a lookup: stem -> entry
+    by_stem = {}
+    for e in entries:
+        by_stem[e["path"].stem] = e
+
+    relations = {}
+    for e in entries:
+        related_refs = e["meta"].get("related", [])
+        if isinstance(related_refs, str):
+            related_refs = [r.strip() for r in related_refs.split(",") if r.strip()]
+        resolved = []
+        for ref in related_refs:
+            # Try exact stem match first
+            if ref in by_stem:
+                resolved.append(by_stem[ref])
+                continue
+            # Try partial match
+            for stem, candidate in by_stem.items():
+                if ref in stem:
+                    resolved.append(candidate)
+                    break
+        relations[e["path"].stem] = resolved
+
+    return relations
+
+
+def cmd_graph(args):
+    """Generate a knowledge graph as a mermaid diagram."""
+    entries = find_entries()
+    if not entries:
+        print("No entries to graph.")
+        return
+
+    relations = resolve_related(entries)
+
+    # Build tag co-occurrence edges (entries sharing tags are connected)
+    tag_entries = {}
+    for e in entries:
+        tags = e["meta"].get("tags", [])
+        if isinstance(tags, str):
+            tags = [t.strip() for t in tags.split(",") if t.strip()]
+        for tag in tags:
+            tag_entries.setdefault(tag.lower(), []).append(e)
+
+    # Node styling by type
+    type_shapes = {
+        "stuck": ("{{", "}}"),     # diamond-ish
+        "decision": ("[[", "]]"),  # subroutine
+        "insight": ("(", ")"),     # rounded
+        "session": ("[", "]"),     # rectangle
+        "note": ("([", "])"),      # stadium
+    }
+
+    lines = ["graph LR"]
+
+    # Define nodes
+    node_ids = {}
+    for i, e in enumerate(entries):
+        nid = f"e{i}"
+        node_ids[e["path"].stem] = nid
+        meta = e["meta"]
+        title = meta.get("title", e["path"].stem)
+        # Truncate long titles
+        if len(title) > 40:
+            title = title[:37] + "..."
+        # Escape quotes for mermaid
+        title = title.replace('"', "'")
+        t = meta.get("type", "note")
+        l, r = type_shapes.get(t, ("[", "]"))
+        lines.append(f"    {nid}{l}\"{title}\"{r}")
+
+    lines.append("")
+
+    # Explicit related edges
+    explicit_edges = set()
+    for e in entries:
+        stem = e["path"].stem
+        nid = node_ids.get(stem)
+        if not nid:
+            continue
+        for rel in relations.get(stem, []):
+            rel_nid = node_ids.get(rel["path"].stem)
+            if rel_nid and nid != rel_nid:
+                edge = tuple(sorted([nid, rel_nid]))
+                if edge not in explicit_edges:
+                    explicit_edges.add(edge)
+                    lines.append(f"    {nid} --- {rel_nid}")
+
+    # Tag-based edges (entries sharing a tag)
+    tag_edges = set()
+    for tag, tag_ents in tag_entries.items():
+        if len(tag_ents) < 2:
+            continue
+        for i in range(len(tag_ents)):
+            for j in range(i + 1, len(tag_ents)):
+                a = node_ids.get(tag_ents[i]["path"].stem)
+                b = node_ids.get(tag_ents[j]["path"].stem)
+                if a and b and a != b:
+                    edge = tuple(sorted([a, b]))
+                    if edge not in explicit_edges and edge not in tag_edges:
+                        tag_edges.add(edge)
+                        lines.append(f"    {a} -.- {b}")
+
+    # Write GRAPH.md
+    graph_content = [
+        "# Knowledge Graph",
+        "",
+        f"*Auto-generated on {datetime.now().strftime('%Y-%m-%d %H:%M')} "
+        f"— {len(entries)} entries, "
+        f"{len(explicit_edges)} direct links, "
+        f"{len(tag_edges)} shared-tag connections.*",
+        "",
+        "Solid lines = explicit `related` links. Dotted lines = shared tags.",
+        "",
+        "```mermaid",
+    ]
+    graph_content.extend(lines)
+    graph_content.append("```")
+    graph_content.append("")
+
+    # Legend
+    graph_content.extend([
+        "## Legend",
+        "",
+        "| Shape | Type |",
+        "|-------|------|",
+        "| `{{ }}` | stuck |",
+        "| `[[ ]]` | decision |",
+        "| `( )` | insight |",
+        "| `[ ]` | session |",
+        "| `([ ])` | note |",
+        "",
+    ])
+
+    graph_path = DATA_DIR / "GRAPH.md"
+    graph_path.write_text("\n".join(graph_content) + "\n")
+
+    print(f"  {c(green, 'Graph built')}: {len(entries)} entries, "
+          f"{len(explicit_edges)} direct + {len(tag_edges)} tag edges")
+    print(f"  {c(dim, str(graph_path))}")
+
+
 # Sections that contain conclusions worth preserving during scrub
 KEEPER_SECTIONS = {"## Resolution", "## The decision", "## Why this approach", "## The insight", "## Takeaway"}
 
@@ -927,8 +1084,9 @@ def cmd_sync(args):
         print(c(dim, "  Nothing to sync - journal is up to date."))
         return
 
-    # Rebuild index before committing
+    # Rebuild index and graph before committing
     cmd_index(args)
+    cmd_graph(args)
 
     # Stage everything (including freshly rebuilt index)
     run(["git", "add", "-A"])
@@ -1055,6 +1213,9 @@ def main():
 
     # index
     sub.add_parser("index", help="Rebuild the topic index from tags").set_defaults(func=cmd_index)
+
+    # graph
+    sub.add_parser("graph", help="Generate knowledge graph (mermaid)").set_defaults(func=cmd_graph)
 
     # sync
     p_sync = sub.add_parser("sync", help="Commit and push journal data")
