@@ -1,0 +1,6 @@
+# Personal journal data - stays local
+data/
+
+# Python
+__pycache__/
+*.pyc

@@ -1,0 +1,510 @@
+#!/usr/bin/env python3
+"""ai-journal: A persistent knowledge system for AI coding assistants."""
+
+import argparse
+import os
+import re
+import sys
+from datetime import datetime
+from pathlib import Path
+
+# --- Config ---
+
+def get_data_dir():
+    """Resolve the journal data directory."""
+    # Check env override first
+    env = os.environ.get("AIJOURNAL_DATA")
+    if env:
+        return Path(env)
+    # Default: data/ relative to this script
+    return Path(__file__).resolve().parent / "data"
+
+DATA_DIR = get_data_dir()
+PROJECTS_DIR = DATA_DIR / "projects"
+
+ENTRY_TYPES = ["session", "decision", "insight", "stuck"]
+
+# --- Frontmatter parsing (no PyYAML needed) ---
+
+def parse_frontmatter(text):
+    """Parse YAML frontmatter from markdown text. Returns (metadata dict, body str)."""
+    if not text.startswith("---"):
+        return {}, text
+    end = text.find("---", 3)
+    if end == -1:
+        return {}, text
+    raw = text[3:end].strip()
+    body = text[end + 3:].strip()
+    meta = {}
+    for line in raw.splitlines():
+        if ":" not in line:
+            continue
+        key, val = line.split(":", 1)
+        key = key.strip()
+        val = val.strip()
+        # Handle lists like [a, b, c]
+        if val.startswith("[") and val.endswith("]"):
+            val = [v.strip().strip("'\"") for v in val[1:-1].split(",") if v.strip()]
+        # Handle quoted strings
+        elif (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+            val = val[1:-1]
+        meta[key] = val
+    return meta, body
+
+
+def format_frontmatter(meta):
+    """Format a metadata dict as YAML frontmatter."""
+    lines = ["---"]
+    for key, val in meta.items():
+        if isinstance(val, list):
+            lines.append(f"{key}: [{', '.join(val)}]")
+        else:
+            lines.append(f"{key}: {val}")
+    lines.append("---")
+    return "\n".join(lines)
+
+# --- Templates ---
+
+TEMPLATES = {
+    "session": """## What we worked on
+
+
+## Key findings
+
+
+## Where we left off
+
+
+## Open questions
+
+""",
+    "decision": """## The decision
+
+
+## Alternatives considered
+
+
+## Why this approach
+
+
+## Context
+
+""",
+    "insight": """## The insight
+
+
+## Where it applies
+
+
+## How it was discovered
+
+""",
+    "stuck": """## What we were trying to do
+
+
+## Symptoms
+
+
+## What we tried
+
+
+## Remaining hypotheses
+
+
+## Relevant files
+
+""",
+}
+
+# --- Helpers ---
+
+def slugify(text):
+    """Turn a title into a filename-safe slug."""
+    text = text.lower().strip()
+    text = re.sub(r"[^\w\s-]", "", text)
+    text = re.sub(r"[\s_]+", "-", text)
+    text = re.sub(r"-+", "-", text)
+    return text.strip("-")[:80]
+
+
+def find_entries(project=None, entry_type=None, status=None):
+    """Find all journal entries, optionally filtered."""
+    entries = []
+    if project:
+        search_dirs = [PROJECTS_DIR / project]
+    else:
+        search_dirs = [d for d in PROJECTS_DIR.iterdir() if d.is_dir()] if PROJECTS_DIR.exists() else []
+
+    for proj_dir in search_dirs:
+        if not proj_dir.exists():
+            continue
+        type_dirs = [entry_type] if entry_type else ENTRY_TYPES
+        for t in type_dirs:
+            t_dir = proj_dir / (t + "s")  # sessions/, decisions/, etc.
+            if not t_dir.exists():
+                continue
+            for f in sorted(t_dir.glob("*.md")):
+                text = f.read_text()
+                meta, body = parse_frontmatter(text)
+                if status and meta.get("status") != status:
+                    continue
+                entries.append({
+                    "path": f,
+                    "meta": meta,
+                    "body": body,
+                    "project": proj_dir.name,
+                })
+    return entries
+
+# --- ANSI colors (minimal) ---
+
+def dim(s):    return f"\033[2m{s}\033[0m"
+def bold(s):   return f"\033[1m{s}\033[0m"
+def red(s):    return f"\033[31m{s}\033[0m"
+def green(s):  return f"\033[32m{s}\033[0m"
+def yellow(s): return f"\033[33m{s}\033[0m"
+def cyan(s):   return f"\033[36m{s}\033[0m"
+
+TYPE_COLORS = {
+    "session": cyan,
+    "decision": green,
+    "insight": yellow,
+    "stuck": red,
+}
+
+def no_color():
+    """Check if color should be disabled."""
+    return os.environ.get("NO_COLOR") or not sys.stdout.isatty()
+
+def c(fn, s):
+    """Apply color function, respecting NO_COLOR."""
+    return s if no_color() else fn(s)
+
+# --- Commands ---
+
+def cmd_new(args):
+    """Create a new journal entry."""
+    entry_type = args.type
+    project = args.project
+    title = args.title or f"New {entry_type}"
+
+    proj_dir = PROJECTS_DIR / project / (entry_type + "s")
+    proj_dir.mkdir(parents=True, exist_ok=True)
+
+    date_prefix = datetime.now().strftime("%Y-%m-%d")
+    slug = slugify(title)
+    filename = f"{date_prefix}-{slug}.md" if slug else f"{date_prefix}.md"
+    filepath = proj_dir / filename
+
+    # Avoid collisions
+    counter = 2
+    while filepath.exists():
+        filepath = proj_dir / f"{date_prefix}-{slug}-{counter}.md"
+        counter += 1
+
+    meta = {
+        "type": entry_type,
+        "title": title,
+        "project": project,
+        "created": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        "tags": [],
+        "status": "open" if entry_type == "stuck" else "active",
+    }
+
+    content = format_frontmatter(meta) + "\n\n" + TEMPLATES[entry_type]
+    filepath.write_text(content)
+
+    # Also create overview.md if it doesn't exist
+    overview = PROJECTS_DIR / project / "overview.md"
+    if not overview.exists():
+        overview.write_text(f"# {project}\n\nProject overview - auto-generated.\n")
+
+    print(f"Created: {filepath}")
+
+    # Open in editor if interactive
+    editor = os.environ.get("EDITOR")
+    if editor and sys.stdin.isatty():
+        os.execvp(editor, [editor, str(filepath)])
+
+
+def cmd_list(args):
+    """List journal entries."""
+    entries = find_entries(project=args.project, entry_type=args.type)
+
+    if not entries:
+        print("No entries found.")
+        return
+
+    # Group by project
+    by_project = {}
+    for e in entries:
+        by_project.setdefault(e["project"], []).append(e)
+
+    for proj, proj_entries in sorted(by_project.items()):
+        print(c(bold, f"\n  {proj}"))
+        print(c(dim, "  " + "─" * 40))
+        for e in proj_entries:
+            meta = e["meta"]
+            t = meta.get("type", "?")
+            title = meta.get("title", e["path"].stem)
+            status = meta.get("status", "")
+            color_fn = TYPE_COLORS.get(t, dim)
+            status_str = f" [{status}]" if status else ""
+            padded_t = f"{t:>10}"
+            print(f"  {c(color_fn, padded_t)}  {title}{c(dim, status_str)}")
+            print(f"  {c(dim, str(e['path']))}")
+    print()
+
+
+def cmd_show(args):
+    """Show a journal entry."""
+    path = Path(args.path)
+    if not path.exists():
+        # Try to find it as a partial match
+        matches = list(PROJECTS_DIR.rglob(f"*{args.path}*"))
+        if len(matches) == 1:
+            path = matches[0]
+        elif len(matches) > 1:
+            print("Multiple matches:")
+            for m in matches:
+                print(f"  {m}")
+            return
+        else:
+            print(f"Not found: {args.path}")
+            return
+
+    text = path.read_text()
+    meta, body = parse_frontmatter(text)
+
+    t = meta.get("type", "?")
+    color_fn = TYPE_COLORS.get(t, dim)
+
+    print()
+    print(c(bold, f"  {meta.get('title', path.stem)}"))
+    print(f"  {c(color_fn, t)} | {c(dim, meta.get('created', '?'))} | status: {meta.get('status', '?')}")
+    tags = meta.get("tags", [])
+    if tags:
+        tag_str = ", ".join(tags) if isinstance(tags, list) else str(tags)
+        print(f"  tags: {c(dim, tag_str)}")
+    print(c(dim, "  " + "─" * 50))
+    print()
+    print(body)
+    print()
+
+
+def cmd_search(args):
+    """Search entries by text."""
+    query = args.query.lower()
+    entries = find_entries()
+    hits = []
+
+    for e in entries:
+        text = e["path"].read_text().lower()
+        if query in text:
+            hits.append(e)
+
+    if not hits:
+        print(f"No entries matching '{args.query}'.")
+        return
+
+    print(f"\n  Found {len(hits)} match(es) for '{args.query}':\n")
+    for e in hits:
+        meta = e["meta"]
+        t = meta.get("type", "?")
+        title = meta.get("title", e["path"].stem)
+        color_fn = TYPE_COLORS.get(t, dim)
+        padded_t = f"{t:>10}"
+        proj_name = e["project"]
+        print(f"  {c(color_fn, padded_t)}  {title} {c(dim, f'({proj_name})')}")
+
+        # Show matching lines for context
+        text = e["path"].read_text()
+        for i, line in enumerate(text.splitlines()):
+            if query in line.lower() and not line.startswith("---"):
+                snippet = line.strip()[:100]
+                print(f"             {c(dim, snippet)}")
+        print()
+
+
+def cmd_status(args):
+    """Show project status - open stuck points, recent sessions."""
+    project = args.project
+
+    if project:
+        projects = [project]
+    else:
+        if not PROJECTS_DIR.exists():
+            print("No projects found. Create one with: journal new <type> <project>")
+            return
+        projects = sorted([d.name for d in PROJECTS_DIR.iterdir() if d.is_dir()])
+
+    if not projects:
+        print("No projects found.")
+        return
+
+    for proj in projects:
+        print(c(bold, f"\n  {proj}"))
+        print(c(dim, "  " + "═" * 40))
+
+        # Open stuck points
+        stuck = find_entries(project=proj, entry_type="stuck", status="open")
+        if stuck:
+            print(c(red, f"\n  Stuck ({len(stuck)}):"))
+            for e in stuck:
+                print(f"    - {e['meta'].get('title', '?')}")
+                print(f"      {c(dim, str(e['path']))}")
+        else:
+            print(c(green, "\n  No open stuck points"))
+
+        # Recent sessions (last 3)
+        sessions = find_entries(project=proj, entry_type="session")
+        if sessions:
+            recent = sessions[-3:]
+            print(f"\n  {c(cyan, f'Recent sessions ({len(sessions)} total):')}")
+            for e in recent:
+                date = e["meta"].get("created", "?")[:10]
+                print(f"    {c(dim, date)}  {e['meta'].get('title', '?')}")
+
+        # Active decisions
+        decisions = find_entries(project=proj, entry_type="decision")
+        if decisions:
+            print(f"\n  {c(green, f'Decisions ({len(decisions)}):')}")
+            for e in decisions[-3:]:
+                print(f"    - {e['meta'].get('title', '?')}")
+
+        # Insights count
+        insights = find_entries(project=proj, entry_type="insight")
+        if insights:
+            print(f"\n  {c(yellow, f'{len(insights)} insight(s) recorded')}")
+
+    print()
+
+
+def cmd_projects(args):
+    """List all projects."""
+    if not PROJECTS_DIR.exists():
+        print("No projects yet. Create one with: journal new <type> <project>")
+        return
+
+    projects = sorted([d for d in PROJECTS_DIR.iterdir() if d.is_dir()])
+    if not projects:
+        print("No projects yet.")
+        return
+
+    print(c(bold, "\n  Projects:\n"))
+    for proj_dir in projects:
+        name = proj_dir.name
+        # Count entries
+        counts = {}
+        for t in ENTRY_TYPES:
+            t_dir = proj_dir / (t + "s")
+            if t_dir.exists():
+                counts[t] = len(list(t_dir.glob("*.md")))
+
+        stuck_open = len(find_entries(project=name, entry_type="stuck", status="open"))
+
+        parts = []
+        for t in ENTRY_TYPES:
+            if counts.get(t, 0) > 0:
+                color_fn = TYPE_COLORS.get(t, dim)
+                label = f"{counts[t]} {t}"
+                if t == "stuck" and stuck_open > 0:
+                    label += f" ({stuck_open} open)"
+                parts.append(c(color_fn, label))
+
+        summary = " | ".join(parts) if parts else c(dim, "empty")
+        print(f"  {c(bold, name)}")
+        print(f"    {summary}")
+    print()
+
+
+def cmd_resolve(args):
+    """Mark a stuck entry as resolved."""
+    path = Path(args.path)
+    if not path.exists():
+        matches = list(PROJECTS_DIR.rglob(f"*{args.path}*"))
+        matches = [m for m in matches if "/stucks/" in str(m)]
+        if len(matches) == 1:
+            path = matches[0]
+        elif len(matches) > 1:
+            print("Multiple matches:")
+            for m in matches:
+                print(f"  {m}")
+            return
+        else:
+            print(f"Not found: {args.path}")
+            return
+
+    text = path.read_text()
+    meta, body = parse_frontmatter(text)
+
+    if args.solution:
+        body += f"\n\n## Resolution\n\n{args.solution}\n"
+
+    meta["status"] = "resolved"
+    meta["resolved"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+
+    path.write_text(format_frontmatter(meta) + "\n\n" + body)
+    print(f"Resolved: {meta.get('title', path.stem)}")
+    print(f"  {path}")
+
+
+# --- Main ---
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="journal",
+        description="ai-journal: persistent knowledge for AI coding assistants",
+    )
+    sub = parser.add_subparsers(dest="command")
+
+    # new
+    p_new = sub.add_parser("new", help="Create a new entry")
+    p_new.add_argument("type", choices=ENTRY_TYPES)
+    p_new.add_argument("project", help="Project name")
+    p_new.add_argument("-t", "--title", help="Entry title")
+    p_new.set_defaults(func=cmd_new)
+
+    # list
+    p_list = sub.add_parser("list", aliases=["ls"], help="List entries")
+    p_list.add_argument("project", nargs="?", help="Filter by project")
+    p_list.add_argument("--type", choices=ENTRY_TYPES, help="Filter by type")
+    p_list.set_defaults(func=cmd_list)
+
+    # show
+    p_show = sub.add_parser("show", help="Show an entry")
+    p_show.add_argument("path", help="File path or partial name")
+    p_show.set_defaults(func=cmd_show)
+
+    # search
+    p_search = sub.add_parser("search", help="Search entries")
+    p_search.add_argument("query", help="Text to search for")
+    p_search.set_defaults(func=cmd_search)
+
+    # status
+    p_status = sub.add_parser("status", help="Show project status")
+    p_status.add_argument("project", nargs="?", help="Project name")
+    p_status.set_defaults(func=cmd_status)
+
+    # projects
+    sub.add_parser("projects", help="List all projects").set_defaults(func=cmd_projects)
+
+    # resolve
+    p_resolve = sub.add_parser("resolve", help="Mark a stuck entry as resolved")
+    p_resolve.add_argument("path", help="Stuck entry path or partial name")
+    p_resolve.add_argument("-s", "--solution", help="How it was resolved")
+    p_resolve.set_defaults(func=cmd_resolve)
+
+    args = parser.parse_args()
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
+
+    # Ensure data dir exists
+    PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
