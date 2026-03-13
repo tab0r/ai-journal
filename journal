@@ -203,12 +203,15 @@ def cmd_new(args):
         filepath = proj_dir / f"{date_prefix}-{slug}-{counter}.md"
         counter += 1
 
+    scope = args.scope or "private"
+
     meta = {
         "type": entry_type,
         "title": title,
         "project": project,
         "created": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
         "tags": [],
+        "scope": scope,
         "status": "open" if entry_type == "stuck" else "active",
     }
 
@@ -527,6 +530,118 @@ def cmd_index(args):
     print(f"  {c(dim, str(index_path))}")
 
 
+# Sections that contain conclusions worth preserving during scrub
+KEEPER_SECTIONS = {"## Resolution", "## The decision", "## Why this approach", "## The insight"}
+
+
+def scrub_body(body):
+    """Strip a body down to only conclusion sections.
+
+    Returns the preserved text (may be empty).
+    """
+    kept = []
+    current_section = None
+    current_lines = []
+
+    for line in body.splitlines():
+        if line.startswith("## "):
+            # Save previous section if it was a keeper
+            if current_section and current_lines:
+                kept.append(current_section)
+                kept.extend(current_lines)
+                kept.append("")
+            # Check if new section is a keeper
+            if any(line.startswith(k) for k in KEEPER_SECTIONS):
+                current_section = line
+                current_lines = []
+            else:
+                current_section = None
+                current_lines = []
+        elif current_section is not None:
+            current_lines.append(line)
+
+    # Don't forget the last section
+    if current_section and current_lines:
+        kept.append(current_section)
+        kept.extend(current_lines)
+
+    return "\n".join(kept).strip()
+
+
+def cmd_scrub(args):
+    """Scrub all entries matching a scope, preserving conclusions as tombstones."""
+    scope = args.scope
+    no_tombstones = args.no_tombstones
+    dry_run = args.dry_run
+
+    entries = find_entries()
+    targets = [e for e in entries if e["meta"].get("scope") == scope]
+
+    if not targets:
+        print(f"No entries with scope '{scope}' found.")
+        return
+
+    print(f"\n  Found {c(bold, str(len(targets)))} entries with scope {c(red, scope)}:\n")
+    for e in targets:
+        meta = e["meta"]
+        title = meta.get("title", e["path"].stem)
+        t = meta.get("type", "?")
+        color_fn = TYPE_COLORS.get(t, dim)
+        padded_t = f"{t:>10}"
+        proj_name = e["project"]
+        print(f"  {c(color_fn, padded_t)}  {title} {c(dim, f'({proj_name})')}")
+
+    if dry_run:
+        print(f"\n  {c(dim, 'Dry run - no changes made.')}")
+        return
+
+    # Confirm
+    if sys.stdin.isatty():
+        print()
+        answer = input(f"  Scrub these {len(targets)} entries? [y/N] ")
+        if answer.lower() != "y":
+            print("  Aborted.")
+            return
+
+    scrubbed = 0
+    deleted = 0
+    for e in targets:
+        meta = e["meta"]
+        body = e["body"]
+        path = e["path"]
+
+        if no_tombstones:
+            path.unlink()
+            deleted += 1
+            continue
+
+        # Preserve conclusions
+        preserved = scrub_body(body)
+
+        # Build tombstone
+        meta["title"] = "[scrubbed]"
+        meta["scrubbed"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        meta["original_scope"] = scope
+        meta.pop("scope", None)
+
+        tombstone_body = "*Details scrubbed. "
+        if preserved:
+            tombstone_body += "Conclusion preserved.*\n\n" + preserved
+        else:
+            tombstone_body += "No conclusions to preserve.*"
+
+        path.write_text(format_frontmatter(meta) + "\n\n" + tombstone_body + "\n")
+        scrubbed += 1
+
+    if no_tombstones:
+        print(f"\n  {c(red, f'Deleted {deleted} entries')} (no tombstones).")
+    else:
+        print(f"\n  {c(green, f'Scrubbed {scrubbed} entries')} — tombstones preserved.")
+
+    # Rebuild index
+    cmd_index(args)
+
+
 def cmd_sync(args):
     """Commit and push journal data to the private repo."""
     if not (DATA_DIR / ".git").exists():
@@ -601,6 +716,7 @@ def main():
     p_new.add_argument("type", choices=ENTRY_TYPES)
     p_new.add_argument("project", help="Project name")
     p_new.add_argument("-t", "--title", help="Entry title")
+    p_new.add_argument("-s", "--scope", help="Scope (default: private)", default="private")
     p_new.set_defaults(func=cmd_new)
 
     # list
@@ -632,6 +748,13 @@ def main():
     p_resolve.add_argument("path", help="Stuck entry path or partial name")
     p_resolve.add_argument("-s", "--solution", help="How it was resolved")
     p_resolve.set_defaults(func=cmd_resolve)
+
+    # scrub
+    p_scrub = sub.add_parser("scrub", help="Scrub entries by scope, preserving conclusions")
+    p_scrub.add_argument("scope", help="Scope to scrub (e.g. grafana-internal, personal)")
+    p_scrub.add_argument("--no-tombstones", action="store_true", help="Delete entirely instead of leaving tombstones")
+    p_scrub.add_argument("--dry-run", action="store_true", help="Show what would be scrubbed without doing it")
+    p_scrub.set_defaults(func=cmd_scrub)
 
     # index
     sub.add_parser("index", help="Rebuild the topic index from tags").set_defaults(func=cmd_index)
