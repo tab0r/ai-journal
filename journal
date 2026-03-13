@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ai-journal: A persistent knowledge system for AI coding assistants."""
+"""ai-journal: Shared memory between two minds."""
 
 import argparse
 import os
@@ -23,7 +23,7 @@ def get_data_dir():
 DATA_DIR = get_data_dir()
 PROJECTS_DIR = DATA_DIR / "projects"
 
-ENTRY_TYPES = ["session", "decision", "insight", "stuck"]
+ENTRY_TYPES = ["session", "decision", "insight", "stuck", "note"]
 
 # --- Frontmatter parsing (no PyYAML needed) ---
 
@@ -103,16 +103,19 @@ TEMPLATES = {
     "stuck": """## What we were trying to do
 
 
-## Symptoms
+## What's happening
 
 
 ## What we tried
 
 
-## Remaining hypotheses
+## Remaining ideas
 
 
-## Relevant files
+## References
+
+""",
+    "note": """
 
 """,
 }
@@ -175,11 +178,14 @@ def green(s):  return f"\033[32m{s}\033[0m"
 def yellow(s): return f"\033[33m{s}\033[0m"
 def cyan(s):   return f"\033[36m{s}\033[0m"
 
+def magenta(s): return f"\033[35m{s}\033[0m"
+
 TYPE_COLORS = {
     "session": cyan,
     "decision": green,
     "insight": yellow,
     "stuck": red,
+    "note": magenta,
 }
 
 def no_color():
@@ -479,6 +485,75 @@ def cmd_resolve(args):
     print(f"  {path}")
 
 
+def cmd_import(args):
+    """Import a file into the journal with context."""
+    import shutil
+
+    source = Path(args.file).expanduser().resolve()
+    if not source.exists():
+        print(f"File not found: {source}")
+        return
+
+    project = args.project
+    title = args.title or source.name
+    summary = args.summary or ""
+    scope = args.scope or "private"
+
+    # Create attachments directory
+    attach_dir = PROJECTS_DIR / project / "attachments"
+    attach_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy file
+    dest_file = attach_dir / source.name
+    counter = 2
+    while dest_file.exists():
+        stem = source.stem
+        suffix = source.suffix
+        dest_file = attach_dir / f"{stem}-{counter}{suffix}"
+        counter += 1
+    shutil.copy2(source, dest_file)
+
+    # Create a note entry referencing the file
+    notes_dir = PROJECTS_DIR / project / "notes"
+    notes_dir.mkdir(parents=True, exist_ok=True)
+
+    date_prefix = datetime.now().strftime("%Y-%m-%d")
+    slug = slugify(title)
+    filename = f"{date_prefix}-{slug}.md" if slug else f"{date_prefix}.md"
+    entry_path = notes_dir / filename
+
+    rel_attachment = os.path.relpath(dest_file, entry_path.parent)
+
+    meta = {
+        "type": "note",
+        "title": title,
+        "project": project,
+        "created": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        "summary": summary,
+        "tags": args.tags.split(",") if args.tags else [],
+        "scope": scope,
+        "status": "active",
+        "attachment": str(dest_file.relative_to(PROJECTS_DIR / project)),
+    }
+
+    context = args.context or ""
+    body = f"Imported from `{source}`\n"
+    if context:
+        body += f"\n{context}\n"
+    body += f"\n## Attachment\n\n[{source.name}]({rel_attachment})\n"
+
+    entry_path.write_text(format_frontmatter(meta) + "\n\n" + body)
+
+    # Also create overview.md if it doesn't exist
+    overview = PROJECTS_DIR / project / "overview.md"
+    if not overview.exists():
+        overview.write_text(f"# {project}\n\nProject overview - auto-generated.\n")
+
+    print(f"  {c(green, 'Imported')}: {source.name}")
+    print(f"  Entry: {entry_path}")
+    print(f"  Attachment: {dest_file}")
+
+
 def cmd_index(args):
     """Build or rebuild the topic index from entry tags."""
     entries = find_entries()
@@ -560,7 +635,7 @@ def cmd_index(args):
 
 
 # Sections that contain conclusions worth preserving during scrub
-KEEPER_SECTIONS = {"## Resolution", "## The decision", "## Why this approach", "## The insight"}
+KEEPER_SECTIONS = {"## Resolution", "## The decision", "## Why this approach", "## The insight", "## Takeaway"}
 
 
 def scrub_body(body):
@@ -901,7 +976,7 @@ def cmd_sync(args):
 def main():
     parser = argparse.ArgumentParser(
         prog="journal",
-        description="ai-journal: persistent knowledge for AI coding assistants",
+        description="ai-journal: shared memory between two minds",
     )
     sub = parser.add_subparsers(dest="command")
 
@@ -943,6 +1018,17 @@ def main():
     p_resolve.add_argument("path", help="Stuck entry path or partial name")
     p_resolve.add_argument("-s", "--solution", help="How it was resolved")
     p_resolve.set_defaults(func=cmd_resolve)
+
+    # import
+    p_import = sub.add_parser("import", help="Import a file into the journal")
+    p_import.add_argument("file", help="File to import")
+    p_import.add_argument("project", help="Project name")
+    p_import.add_argument("-t", "--title", help="Entry title (default: filename)")
+    p_import.add_argument("--summary", help="What this file is and why it matters")
+    p_import.add_argument("--tags", help="Comma-separated tags")
+    p_import.add_argument("--context", help="Additional context about the file")
+    p_import.add_argument("-s", "--scope", help="Scope (default: private)", default="private")
+    p_import.set_defaults(func=cmd_import)
 
     # scrub
     p_scrub = sub.add_parser("scrub", help="Scrub entries by scope, preserving conclusions")

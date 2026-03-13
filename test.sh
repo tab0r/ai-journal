@@ -326,6 +326,48 @@ echo ""
 
 # --- hook ---
 
+# --- note ---
+
+echo "note:"
+
+$JOURNAL new note testproj -t "Random thought about naming" --summary "Names shape how people think about tools" >/dev/null
+assert_file_exists "creates note entry" "$TEST_DATA/projects/testproj/notes/"*random-thought*.md
+assert_file_contains "note has type note" "$TEST_DATA/projects/testproj/notes/"*random-thought*.md "type: note"
+assert_file_contains "note has summary" "$TEST_DATA/projects/testproj/notes/"*random-thought*.md "Names shape"
+
+echo ""
+
+# --- import ---
+
+echo "import:"
+
+# Create a test file to import
+echo "This is a test document with important information." > "$TEST_DATA/test-doc.txt"
+
+$JOURNAL import "$TEST_DATA/test-doc.txt" testproj -t "Test document" --summary "A test file for import" --tags "testing,import" --context "Imported as part of the test suite" >/dev/null
+assert_file_exists "creates note entry for import" "$TEST_DATA/projects/testproj/notes/"*test-document*.md
+assert_file_exists "copies file to attachments" "$TEST_DATA/projects/testproj/attachments/test-doc.txt"
+assert_file_contains "import entry references source" "$TEST_DATA/projects/testproj/notes/"*test-document*.md "test-doc.txt"
+assert_file_contains "import entry has tags" "$TEST_DATA/projects/testproj/notes/"*test-document*.md "testing"
+assert_file_contains "import entry has context" "$TEST_DATA/projects/testproj/notes/"*test-document*.md "test suite"
+assert_file_contains "import entry has attachment metadata" "$TEST_DATA/projects/testproj/notes/"*test-document*.md "attachment:"
+
+# Verify attachment content
+assert_file_contains "attachment has original content" "$TEST_DATA/projects/testproj/attachments/test-doc.txt" "important information"
+
+# Import same file again - should not collide
+$JOURNAL import "$TEST_DATA/test-doc.txt" testproj -t "Test document duplicate" >/dev/null
+count=$(ls "$TEST_DATA/projects/testproj/attachments/"test-doc* 2>/dev/null | wc -l)
+if [ "$count" -ge 2 ]; then
+    pass "import handles attachment filename collisions"
+else
+    fail "import handles attachment filename collisions" "expected 2+ files, got $count"
+fi
+
+echo ""
+
+# --- hook ---
+
 echo "hook:"
 
 HOOK="$(cd "$(dirname "$0")" && pwd)/journal-hook"
