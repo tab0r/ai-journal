@@ -17,8 +17,8 @@ When you're deep in a debugging session with an AI assistant and hit a wall, you
 
 ## Entry Types
 
-| Type | Purpose |
-|------|---------|
+| | |
+|---|---|
 | **session** | What happened in a conversation - progress, findings, where we left off |
 | **decision** | A choice that was made, alternatives considered, and why |
 | **insight** | Something learned about the codebase or project |
@@ -71,7 +71,9 @@ type: stuck
 title: Race condition in background worker
 project: tapedeck
 created: 2026-03-13T22:15:00
+summary: Workers grab the same job simultaneously. Advisory locks don't help due to connection pool rotation.
 tags: [concurrency, worker, postgres]
+scope: private
 status: open
 ---
 
