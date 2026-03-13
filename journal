@@ -23,7 +23,7 @@ def get_data_dir():
 DATA_DIR = get_data_dir()
 PROJECTS_DIR = DATA_DIR / "projects"
 
-ENTRY_TYPES = ["session", "decision", "insight", "stuck", "note"]
+ENTRY_TYPES = ["session", "decision", "insight", "stuck", "note", "reflection"]
 
 # --- Frontmatter parsing (no PyYAML needed) ---
 
@@ -118,6 +118,18 @@ TEMPLATES = {
     "note": """
 
 """,
+    "reflection": """## What I noticed
+
+
+## What surprised me
+
+
+## Connections I'm seeing
+
+
+## What I'd do differently next time
+
+""",
 }
 
 # --- Helpers ---
@@ -186,6 +198,7 @@ TYPE_COLORS = {
     "insight": yellow,
     "stuck": red,
     "note": magenta,
+    "reflection": dim,
 }
 
 def no_color():
@@ -485,6 +498,64 @@ def cmd_resolve(args):
     print(f"  {path}")
 
 
+def cmd_reflect(args):
+    """Create a reflection entry with loop guard."""
+    project = args.project
+
+    # Loop guard: check if there's already a reflection today for this project
+    today = datetime.now().strftime("%Y-%m-%d")
+    reflections = find_entries(project=project, entry_type="reflection")
+    todays = [e for e in reflections if e["meta"].get("created", "").startswith(today)]
+
+    if todays and not args.force:
+        print(f"  Already reflected on {project} today ({len(todays)} reflection(s)).")
+        print(f"  Use --force to reflect again, but consider: is this genuinely new?")
+        return
+
+    # Create the reflection
+    title = args.title or f"Reflection on {project}"
+    summary = args.summary or ""
+    scope = args.scope or "private"
+
+    proj_dir = PROJECTS_DIR / project / "reflections"
+    proj_dir.mkdir(parents=True, exist_ok=True)
+
+    slug = slugify(title)
+    filename = f"{today}-{slug}.md" if slug else f"{today}.md"
+    filepath = proj_dir / filename
+
+    counter = 2
+    while filepath.exists():
+        filepath = proj_dir / f"{today}-{slug}-{counter}.md"
+        counter += 1
+
+    meta = {
+        "type": "reflection",
+        "title": title,
+        "project": project,
+        "created": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        "summary": summary,
+        "tags": [],
+        "scope": scope,
+        "status": "active",
+    }
+
+    content = format_frontmatter(meta) + "\n\n" + TEMPLATES["reflection"]
+    filepath.write_text(content)
+
+    # Also create overview.md if it doesn't exist
+    overview = PROJECTS_DIR / project / "overview.md"
+    if not overview.exists():
+        overview.write_text(f"# {project}\n\nProject overview - auto-generated.\n")
+
+    print(f"Created: {filepath}")
+
+    # Open in editor if interactive
+    editor = os.environ.get("EDITOR")
+    if editor and sys.stdin.isatty():
+        os.execvp(editor, [editor, str(filepath)])
+
+
 def cmd_import(args):
     """Import a file into the journal with context."""
     import shutil
@@ -700,6 +771,7 @@ def cmd_graph(args):
         "insight": ("(", ")"),     # rounded
         "session": ("[", "]"),     # rectangle
         "note": ("([", "])"),      # stadium
+        "reflection": (">", "]"),  # asymmetric
     }
 
     lines = ["graph LR"]
@@ -780,6 +852,7 @@ def cmd_graph(args):
         "| `( )` | insight |",
         "| `[ ]` | session |",
         "| `([ ])` | note |",
+        "| `> ]` | reflection |",
         "",
     ])
 
@@ -792,7 +865,7 @@ def cmd_graph(args):
 
 
 # Sections that contain conclusions worth preserving during scrub
-KEEPER_SECTIONS = {"## Resolution", "## The decision", "## Why this approach", "## The insight", "## Takeaway"}
+KEEPER_SECTIONS = {"## Resolution", "## The decision", "## Why this approach", "## The insight", "## Takeaway", "## Connections I'm seeing", "## What I'd do differently next time"}
 
 
 def scrub_body(body):
@@ -1187,6 +1260,15 @@ def main():
     p_import.add_argument("--context", help="Additional context about the file")
     p_import.add_argument("-s", "--scope", help="Scope (default: private)", default="private")
     p_import.set_defaults(func=cmd_import)
+
+    # reflect
+    p_reflect = sub.add_parser("reflect", help="Create a reflection (1 per project per day)")
+    p_reflect.add_argument("project", help="Project name")
+    p_reflect.add_argument("-t", "--title", help="Reflection title")
+    p_reflect.add_argument("--summary", help="Brief summary")
+    p_reflect.add_argument("-s", "--scope", help="Scope (default: private)", default="private")
+    p_reflect.add_argument("--force", action="store_true", help="Bypass the once-per-day guard")
+    p_reflect.set_defaults(func=cmd_reflect)
 
     # scrub
     p_scrub = sub.add_parser("scrub", help="Scrub entries by scope, preserving conclusions")

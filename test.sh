@@ -355,6 +355,34 @@ assert_file_contains "note has summary" "$TEST_DATA/projects/testproj/notes/"*ra
 
 echo ""
 
+# --- reflect ---
+
+echo "reflect:"
+
+$JOURNAL reflect testproj -t "First reflection" --summary "Testing the reflection system" >/dev/null
+assert_file_exists "creates reflection entry" "$TEST_DATA/projects/testproj/reflections/"*first-reflection*.md
+assert_file_contains "reflection has type" "$TEST_DATA/projects/testproj/reflections/"*first-reflection*.md "type: reflection"
+assert_file_contains "reflection has template" "$TEST_DATA/projects/testproj/reflections/"*first-reflection*.md "## What I noticed"
+
+# Loop guard
+output=$($JOURNAL reflect testproj -t "Second reflection" 2>&1)
+if echo "$output" | grep -q "Already reflected"; then
+    pass "loop guard blocks second reflection same day"
+else
+    fail "loop guard blocks second reflection same day" "guard didn't fire"
+fi
+
+# Force override
+$JOURNAL reflect testproj -t "Forced reflection" --force >/dev/null 2>&1
+count=$(ls "$TEST_DATA/projects/testproj/reflections/"*.md 2>/dev/null | wc -l)
+if [ "$count" -ge 2 ]; then
+    pass "force flag bypasses loop guard"
+else
+    fail "force flag bypasses loop guard" "expected 2+ files, got $count"
+fi
+
+echo ""
+
 # --- import ---
 
 echo "import:"
