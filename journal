@@ -537,20 +537,23 @@ def cmd_sync(args):
     def run(cmd):
         return subprocess.run(cmd, cwd=DATA_DIR, capture_output=True, text=True)
 
-    # Check for changes
+    # Check for changes before index rebuild
     result = run(["git", "status", "--porcelain"])
     if not result.stdout.strip():
         print(c(dim, "  Nothing to sync - journal is up to date."))
         return
 
-    # Stage everything
+    # Rebuild index before committing
+    cmd_index(args)
+
+    # Stage everything (including freshly rebuilt index)
     run(["git", "add", "-A"])
 
     # Build a commit message from what changed
-    diff = run(["git", "diff", "--cached", "--stat"])
-    changed_files = [line.strip().split("|")[0].strip() for line in diff.stdout.splitlines() if "|" in line]
+    diff = run(["git", "diff", "--cached", "--name-only"])
+    changed_files = [line.strip() for line in diff.stdout.splitlines() if line.strip()]
 
-    # Summarize: count new/modified entries by type
+    # Summarize: count new/modified entries by type (skip INDEX.md, overview.md)
     summary_parts = []
     for f in changed_files:
         for t in ENTRY_TYPES:
@@ -558,12 +561,12 @@ def cmd_sync(args):
                 summary_parts.append(t)
                 break
 
+    from collections import Counter
     if summary_parts:
-        from collections import Counter
         counts = Counter(summary_parts)
         msg = "journal: " + ", ".join(f"{v} {k}{'s' if v > 1 else ''}" for k, v in counts.items())
     else:
-        msg = "journal: update entries"
+        msg = "journal: update index"
 
     if args.message:
         msg = args.message
