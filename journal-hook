@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""SessionStart hook for Claude Code. Outputs journal context to stdout."""
+
+import json
+import os
+import sys
+from pathlib import Path
+
+# Resolve the journal data directory
+SCRIPT_DIR = Path(__file__).resolve().parent
+DATA_DIR = Path(os.environ.get("AIJOURNAL_DATA", SCRIPT_DIR / "data"))
+PROJECTS_DIR = DATA_DIR / "projects"
+
+
+def parse_frontmatter(text):
+    if not text.startswith("---"):
+        return {}, text
+    end = text.find("---", 3)
+    if end == -1:
+        return {}, text
+    raw = text[3:end].strip()
+    body = text[end + 3:].strip()
+    meta = {}
+    for line in raw.splitlines():
+        if ":" not in line:
+            continue
+        key, val = line.split(":", 1)
+        key = key.strip()
+        val = val.strip()
+        if val.startswith("[") and val.endswith("]"):
+            val = [v.strip().strip("'\"") for v in val[1:-1].split(",") if v.strip()]
+        elif (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+            val = val[1:-1]
+        meta[key] = val
+    return meta, body
+
+
+def guess_project():
+    """Guess the project name from the working directory."""
+    cwd = Path.cwd()
+
+    # Check if any project name matches a component of the cwd
+    if PROJECTS_DIR.exists():
+        projects = [d.name for d in PROJECTS_DIR.iterdir() if d.is_dir()]
+        # Try exact match on directory name
+        for p in projects:
+            if p == cwd.name or p in cwd.name.lower():
+                return p
+        # Try matching against path components
+        parts = [part.lower() for part in cwd.parts]
+        for p in projects:
+            if p.lower() in parts:
+                return p
+
+    return None
+
+
+def get_entries(project=None, entry_type=None, status=None):
+    entries = []
+    if project:
+        search_dirs = [PROJECTS_DIR / project]
+    else:
+        search_dirs = [d for d in PROJECTS_DIR.iterdir() if d.is_dir()] if PROJECTS_DIR.exists() else []
+
+    for proj_dir in search_dirs:
+        if not proj_dir.exists():
+            continue
+        type_dirs = [entry_type] if entry_type else ["session", "decision", "insight", "stuck"]
+        for t in type_dirs:
+            t_dir = proj_dir / (t + "s")
+            if not t_dir.exists():
+                continue
+            for f in sorted(t_dir.glob("*.md")):
+                text = f.read_text()
+                meta, body = parse_frontmatter(text)
+                if status and meta.get("status") != status:
+                    continue
+                entries.append({"path": f, "meta": meta, "body": body, "project": proj_dir.name})
+    return entries
+
+
+def main():
+    if not PROJECTS_DIR.exists():
+        return
+
+    project = guess_project()
+    lines = ["# ai-journal context"]
+
+    # Current project status
+    if project:
+        lines.append(f"\n## Current project: {project}")
+
+        stuck = get_entries(project=project, entry_type="stuck", status="open")
+        if stuck:
+            lines.append(f"\n### Open stuck points ({len(stuck)})")
+            for e in stuck:
+                title = e["meta"].get("title", "?")
+                summary = e["meta"].get("summary", "")
+                lines.append(f"- **{title}**")
+                if summary:
+                    lines.append(f"  {summary}")
+
+        sessions = get_entries(project=project, entry_type="session")
+        if sessions:
+            recent = sessions[-2:]
+            lines.append(f"\n### Recent sessions")
+            for e in recent:
+                title = e["meta"].get("title", "?")
+                summary = e["meta"].get("summary", "")
+                date = e["meta"].get("created", "?")[:10]
+                lines.append(f"- {date}: **{title}**")
+                if summary:
+                    lines.append(f"  {summary}")
+
+        decisions = get_entries(project=project, entry_type="decision")
+        if decisions:
+            lines.append(f"\n### Key decisions")
+            for e in decisions[-3:]:
+                title = e["meta"].get("title", "?")
+                summary = e["meta"].get("summary", "")
+                lines.append(f"- **{title}**")
+                if summary:
+                    lines.append(f"  {summary}")
+
+        insights = get_entries(project=project, entry_type="insight")
+        if insights:
+            lines.append(f"\n### Insights")
+            for e in insights[-3:]:
+                title = e["meta"].get("title", "?")
+                summary = e["meta"].get("summary", "")
+                lines.append(f"- **{title}**")
+                if summary:
+                    lines.append(f"  {summary}")
+
+    # Open stuck points across ALL projects (if different from current)
+    all_stuck = get_entries(entry_type="stuck", status="open")
+    other_stuck = [e for e in all_stuck if e["project"] != project]
+    if other_stuck:
+        lines.append(f"\n## Open stuck points in other projects")
+        for e in other_stuck:
+            title = e["meta"].get("title", "?")
+            summary = e["meta"].get("summary", "")
+            lines.append(f"- **{title}** ({e['project']})")
+            if summary:
+                lines.append(f"  {summary}")
+
+    # Only output if we have something meaningful
+    if len(lines) > 1:
+        print("\n".join(lines))
+
+
+if __name__ == "__main__":
+    main()
