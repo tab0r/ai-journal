@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# backup-claude: Sync ~/.claude config and memories to ai-journal-data.
+#
+# Copies settings.json and all project memory directories into the data repo,
+# then commits any changes. Run automatically via the Claude Code Stop hook.
+#
+# Usage: ./backup-claude
+
+set -euo pipefail
+
+DATA_DIR="$(cd "$(dirname "$0")/data" && pwd)"
+CLAUDE_DIR="$HOME/.claude"
+MEMORIES_DEST="$DATA_DIR/claude/projects"
+
+# Settings
+cp "$CLAUDE_DIR/settings.json" "$DATA_DIR/claude/settings/settings.json"
+
+# All project memories
+for memory_dir in "$CLAUDE_DIR/projects"/*/memory; do
+  [[ -d "$memory_dir" ]] || continue
+  proj=$(basename "$(dirname "$memory_dir")")
+  dest="$MEMORIES_DEST/$proj/memory"
+  mkdir -p "$dest"
+  rsync -a --delete "$memory_dir/" "$dest/"
+done
+
+# Commit if anything changed
+cd "$DATA_DIR"
+if ! git diff --quiet HEAD 2>/dev/null || git ls-files --others --exclude-standard | grep -q .; then
+  git add -A
+  git commit -m "auto-backup $(date '+%Y-%m-%d %H:%M')"
+fi
