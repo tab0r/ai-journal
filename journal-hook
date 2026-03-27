@@ -80,13 +80,15 @@ def get_entries(project=None, entry_type=None, status=None):
     return entries
 
 
-def get_journal_entries(status=None):
+def get_journal_entries(status=None, entry_type=None):
     """Get entries from the personal journal (data/journal/), not tied to any project."""
     entries = []
     if not JOURNAL_DIR.exists():
         return entries
     for type_dir in sorted(JOURNAL_DIR.iterdir()):
         if not type_dir.is_dir():
+            continue
+        if entry_type and type_dir.name != entry_type:
             continue
         for f in sorted(type_dir.glob("*.md")):
             text = f.read_text()
@@ -162,19 +164,26 @@ def main():
             if summary:
                 lines.append(f"  {summary}")
 
-    # Personal journal — most recent entry + any open threads
-    all_journal = get_journal_entries()
-    open_threads = [e for e in all_journal if e["meta"].get("status") == "open"]
-    if all_journal or open_threads:
+    # Personal journal — most recent reflection + any open threads + recent transcript
+    all_reflections = get_journal_entries(entry_type="reflections")
+    all_transcripts = get_journal_entries(entry_type="transcripts")
+    open_threads = [e for e in get_journal_entries() if e["meta"].get("status") == "open"]
+    if all_reflections or open_threads or all_transcripts:
         lines.append("\n## Journal")
-        if all_journal:
-            latest = all_journal[-1]
+        if all_reflections:
+            latest = all_reflections[-1]
             title = latest["meta"].get("title", "?")
             summary = latest["meta"].get("summary", "")
             date = latest["meta"].get("created", "?")[:10]
             lines.append(f"- {date}: **{title}**")
             if summary:
                 lines.append(f"  {summary}")
+        if all_transcripts:
+            latest_t = all_transcripts[-1]
+            title = latest_t["meta"].get("title", "?")
+            date = latest_t["meta"].get("created", "?")[:10]
+            lines.append(f"\n### Most recent transcript")
+            lines.append(f"- {date}: **{title}**")
         if open_threads:
             lines.append("\n### Open threads")
             for e in open_threads:
