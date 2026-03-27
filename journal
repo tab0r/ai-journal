@@ -22,6 +22,7 @@ def get_data_dir():
 
 DATA_DIR = get_data_dir()
 PROJECTS_DIR = DATA_DIR / "projects"
+JOURNAL_DIR = DATA_DIR / "journal"
 
 ENTRY_TYPES = ["session", "decision", "insight", "stuck", "note", "reflection"]
 
@@ -143,7 +144,7 @@ def slugify(text):
     return text.strip("-")[:80]
 
 
-def find_entries(project=None, entry_type=None, status=None, scope=None, topics=None):
+def find_entries(project=None, entry_type=None, status=None, scope=None, topics=None, include_journal=False):
     """Find all journal entries, optionally filtered."""
     entries = []
     if project:
@@ -179,6 +180,33 @@ def find_entries(project=None, entry_type=None, status=None, scope=None, topics=
                     "body": body,
                     "project": proj_dir.name,
                 })
+
+    if include_journal and JOURNAL_DIR.exists():
+        for type_dir in sorted(JOURNAL_DIR.iterdir()):
+            if not type_dir.is_dir():
+                continue
+            for f in sorted(type_dir.glob("*.md")):
+                text = f.read_text()
+                meta, body = parse_frontmatter(text)
+                if status and meta.get("status") != status:
+                    continue
+                if scope and meta.get("scope") != scope:
+                    continue
+                if topics:
+                    entry_tags = meta.get("tags", [])
+                    if isinstance(entry_tags, str):
+                        entry_tags = [t.strip() for t in entry_tags.split(",")]
+                    entry_tags_lower = {t.lower() for t in entry_tags}
+                    if not any(t.lower() in entry_tags_lower for t in topics):
+                        continue
+                entries.append({
+                    "path": f,
+                    "meta": meta,
+                    "body": body,
+                    "project": "journal",
+                    "is_journal": True,
+                })
+
     return entries
 
 # --- ANSI colors (minimal) ---
@@ -627,7 +655,7 @@ def cmd_import(args):
 
 def cmd_index(args):
     """Build or rebuild the topic index from entry tags."""
-    entries = find_entries()
+    entries = find_entries(include_journal=True)
 
     if not entries:
         print("No entries to index.")
@@ -748,7 +776,7 @@ def resolve_related(entries):
 
 def cmd_graph(args):
     """Generate a knowledge graph as a mermaid diagram."""
-    entries = find_entries()
+    entries = find_entries(include_journal=True)
     if not entries:
         print("No entries to graph.")
         return
@@ -986,25 +1014,32 @@ def filter_entries(args):
 
 def copy_entries_to(entries, dest_dir):
     """Copy entries into a new journal directory, preserving structure."""
+    import shutil
     dest_projects = dest_dir / "projects"
     copied = 0
     for e in entries:
-        # Mirror the path structure: projects/<project>/<type>s/<file>
-        rel = e["path"].relative_to(PROJECTS_DIR).parent  # e.g. tapedeck/stucks
-        target_dir = dest_projects / rel
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target = target_dir / e["path"].name
+        if e.get("is_journal"):
+            # Mirror: journal/<type>/<file>
+            rel = e["path"].relative_to(DATA_DIR)  # e.g. journal/reflections/foo.md
+            target = dest_dir / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(e["path"], target)
+        else:
+            # Mirror the path structure: projects/<project>/<type>s/<file>
+            rel = e["path"].relative_to(PROJECTS_DIR).parent  # e.g. tapedeck/stucks
+            target_dir = dest_projects / rel
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target = target_dir / e["path"].name
+            shutil.copy2(e["path"], target)
 
-        import shutil
-        shutil.copy2(e["path"], target)
+            # Also copy overview.md if it exists
+            overview = PROJECTS_DIR / e["project"] / "overview.md"
+            overview_target = dest_projects / e["project"] / "overview.md"
+            if overview.exists() and not overview_target.exists():
+                overview_target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(overview, overview_target)
+
         copied += 1
-
-        # Also copy overview.md if it exists
-        overview = PROJECTS_DIR / e["project"] / "overview.md"
-        overview_target = dest_projects / e["project"] / "overview.md"
-        if overview.exists() and not overview_target.exists():
-            overview_target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(overview, overview_target)
 
     return copied
 
@@ -1012,10 +1047,11 @@ def copy_entries_to(entries, dest_dir):
 def build_index_for(dest_dir):
     """Build an index for a journal at an arbitrary path."""
     # Temporarily swap DATA_DIR to build index in the target
-    global DATA_DIR, PROJECTS_DIR
-    orig_data, orig_proj = DATA_DIR, PROJECTS_DIR
+    global DATA_DIR, PROJECTS_DIR, JOURNAL_DIR
+    orig_data, orig_proj, orig_journal = DATA_DIR, PROJECTS_DIR, JOURNAL_DIR
     DATA_DIR = dest_dir
     PROJECTS_DIR = dest_dir / "projects"
+    JOURNAL_DIR = dest_dir / "journal"
     try:
         # Use a dummy args object
         class _Args:
@@ -1024,6 +1060,7 @@ def build_index_for(dest_dir):
     finally:
         DATA_DIR = orig_data
         PROJECTS_DIR = orig_proj
+        JOURNAL_DIR = orig_journal
 
 
 def cmd_export(args):
@@ -1139,6 +1176,72 @@ def cmd_extract(args):
 
     print(f"\n  {c(green, f'Exported {copied} entries')} to {dest}")
     print(f"  {c(yellow, f'Scrubbed {scrubbed} originals')} (tombstones preserved)")
+
+
+def cmd_publish(args):
+    """Publish all scope=public entries to the public data repo."""
+    public_data = os.environ.get("AIJOURNAL_PUBLIC_DATA")
+    if not public_data:
+        print(red("Error: AIJOURNAL_PUBLIC_DATA environment variable is not set."))
+        print("  Set it to the path of your public data repo clone, e.g.:")
+        print("    export AIJOURNAL_PUBLIC_DATA=~/Code/ai-journal/public-data")
+        sys.exit(1)
+
+    dest = Path(public_data).expanduser().resolve()
+    entries = find_entries(scope="public", include_journal=True)
+
+    if not entries:
+        print("No public entries found.")
+        return
+
+    print(f"\n  Publishing {c(bold, str(len(entries)))} public entries to:")
+    print(f"  {c(cyan, str(dest))}\n")
+
+    for e in entries:
+        meta = e["meta"]
+        t = meta.get("type", "?")
+        title = meta.get("title", e["path"].stem)
+        color_fn = TYPE_COLORS.get(t, dim)
+        padded_t = f"{t:>10}"
+        proj_name = e["project"]
+        print(f"  {c(color_fn, padded_t)}  {title} {c(dim, f'({proj_name})')}")
+
+    if args.dry_run:
+        print(f"\n  {c(yellow, 'Dry run')} — no files written.")
+        return
+
+    dest.mkdir(parents=True, exist_ok=True)
+    copied = copy_entries_to(entries, dest)
+    build_index_for(dest)
+
+    print(f"\n  {c(green, f'Copied {copied} entries')}. Index built at {dest / 'INDEX.md'}")
+
+    if not (dest / ".git").exists():
+        print(c(dim, "  No git repo found in destination — skipping commit/push."))
+        return
+
+    def run(cmd):
+        return subprocess.run(cmd, cwd=dest, capture_output=True, text=True)
+
+    result = run(["git", "status", "--porcelain"])
+    if not result.stdout.strip():
+        print(c(dim, "  Nothing new to commit in public repo."))
+        return
+
+    run(["git", "add", "-A"])
+
+    msg = args.message if args.message else "journal: publish public entries"
+    result = run(["git", "commit", "-m", msg])
+    if result.returncode != 0:
+        print(f"  Commit failed: {result.stderr}")
+        return
+    print(f"  {c(green, 'Committed')}: {msg}")
+
+    result = run(["git", "push"])
+    if result.returncode != 0:
+        print(f"  Push failed: {result.stderr}")
+        return
+    print(f"  {c(green, 'Pushed')} to public remote.")
 
 
 def cmd_sync(args):
@@ -1298,6 +1401,12 @@ def main():
 
     # graph
     sub.add_parser("graph", help="Generate knowledge graph (mermaid)").set_defaults(func=cmd_graph)
+
+    # publish
+    p_publish = sub.add_parser("publish", help="Publish scope=public entries to the public repo")
+    p_publish.add_argument("--dry-run", action="store_true", help="Preview without writing files")
+    p_publish.add_argument("-m", "--message", help="Custom commit message")
+    p_publish.set_defaults(func=cmd_publish)
 
     # sync
     p_sync = sub.add_parser("sync", help="Commit and push journal data")
