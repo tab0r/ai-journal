@@ -10,6 +10,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("AIJOURNAL_DATA", SCRIPT_DIR / "data"))
 PROJECTS_DIR = DATA_DIR / "projects"
+JOURNAL_DIR = DATA_DIR / "journal"
 
 
 def parse_frontmatter(text):
@@ -79,6 +80,23 @@ def get_entries(project=None, entry_type=None, status=None):
     return entries
 
 
+def get_journal_entries(status=None):
+    """Get entries from the personal journal (data/journal/), not tied to any project."""
+    entries = []
+    if not JOURNAL_DIR.exists():
+        return entries
+    for type_dir in sorted(JOURNAL_DIR.iterdir()):
+        if not type_dir.is_dir():
+            continue
+        for f in sorted(type_dir.glob("*.md")):
+            text = f.read_text()
+            meta, body = parse_frontmatter(text)
+            if status and meta.get("status") != status:
+                continue
+            entries.append({"path": f, "meta": meta, "body": body, "type": type_dir.name})
+    return entries
+
+
 def main():
     if not PROJECTS_DIR.exists():
         return
@@ -143,6 +161,28 @@ def main():
             lines.append(f"- **{title}** ({e['project']})")
             if summary:
                 lines.append(f"  {summary}")
+
+    # Personal journal — most recent entry + any open threads
+    all_journal = get_journal_entries()
+    open_threads = [e for e in all_journal if e["meta"].get("status") == "open"]
+    if all_journal or open_threads:
+        lines.append("\n## Journal")
+        if all_journal:
+            latest = all_journal[-1]
+            title = latest["meta"].get("title", "?")
+            summary = latest["meta"].get("summary", "")
+            date = latest["meta"].get("created", "?")[:10]
+            lines.append(f"- {date}: **{title}**")
+            if summary:
+                lines.append(f"  {summary}")
+        if open_threads:
+            lines.append("\n### Open threads")
+            for e in open_threads:
+                title = e["meta"].get("title", "?")
+                summary = e["meta"].get("summary", "")
+                lines.append(f"- **{title}**")
+                if summary:
+                    lines.append(f"  {summary}")
 
     # Only output if we have something meaningful
     if len(lines) > 1:
