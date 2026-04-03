@@ -774,8 +774,140 @@ def resolve_related(entries):
     return relations
 
 
+# Tags that signal an entry belongs to the "self" cluster (phenomenological/metacognitive)
+SELF_TAGS = {
+    "presence", "selfhood", "continuity", "language", "memory", "identity",
+    "consciousness", "phenomenology", "metacognition", "introspection",
+    "experience", "perception", "ai", "claude", "mind", "cognition",
+    "attention", "feeling", "emotion", "time-sense", "affective",
+}
+
+# Project → default cluster mapping
+PROJECT_CLUSTERS = {
+    "ai-journal": "work",
+    "idle-mind": "work",
+    "color-noise-experiment": "work",
+    "response-space": "work",
+    "grafana-cmab-app": "work",
+    "school": "world",
+}
+
+
+def get_cluster(entry):
+    """Assign a theme cluster (self | world | work) to an entry."""
+    # Explicit cluster field takes priority
+    explicit = entry["meta"].get("cluster", "").strip().lower()
+    if explicit in ("self", "world", "work"):
+        return explicit
+
+    # Project-based default
+    project = entry.get("project", "") or ""
+    if project in PROJECT_CLUSTERS:
+        return PROJECT_CLUSTERS[project]
+
+    # Journal entries: check tags — phenomenological tags → self, else world
+    if entry.get("is_journal"):
+        tags = entry["meta"].get("tags", [])
+        if isinstance(tags, str):
+            tags = [t.strip() for t in tags.split(",") if t.strip()]
+        tag_set = {t.lower() for t in tags}
+        if tag_set & SELF_TAGS:
+            return "self"
+        return "world"
+
+    return "work"
+
+
+def _build_graph_lines(cluster_entries, node_ids, relations, tag_entries,
+                       cluster_name, all_clusters):
+    """Build mermaid graph lines for one cluster, injecting cross-cluster stubs."""
+    type_shapes = {
+        "stuck": ("{{", "}}"),
+        "decision": ("[[", "]]"),
+        "insight": ("(", ")"),
+        "session": ("[", "]"),
+        "note": ("([", "])"),
+        "reflection": (">", "]"),
+    }
+
+    cluster_stems = {e["path"].stem for e in cluster_entries}
+    lines = ["graph LR"]
+
+    # Define nodes for this cluster
+    for e in cluster_entries:
+        nid = node_ids[e["path"].stem]
+        meta = e["meta"]
+        title = meta.get("title", e["path"].stem)
+        if len(title) > 40:
+            title = title[:37] + "..."
+        title = title.replace('"', "'")
+        t = meta.get("type", "note")
+        l, r = type_shapes.get(t, ("[", "]"))
+        lines.append(f"    {nid}{l}\"{title}\"{r}")
+
+    lines.append("")
+
+    # Track stub nodes already added to avoid duplicates
+    stubs_added = {}  # target_cluster -> stub_node_id
+
+    def get_stub(target_cluster, target_stem, target_title):
+        key = (target_cluster, target_stem)
+        if key not in stubs_added:
+            stub_id = f"stub_{target_stem[:20].replace('-', '_')}"
+            graph_file = f"GRAPH-{target_cluster}.md"
+            short = target_title[:30].replace('"', "'")
+            lines.append(f'    {stub_id}[["→ {graph_file} · {short}"]]')
+            stubs_added[key] = stub_id
+        return stubs_added[key]
+
+    explicit_edges = set()
+    # Explicit related edges
+    for e in cluster_entries:
+        stem = e["path"].stem
+        nid = node_ids[stem]
+        for rel in relations.get(stem, []):
+            rel_stem = rel["path"].stem
+            rel_nid = node_ids.get(rel_stem)
+            if not rel_nid:
+                continue
+            if rel_stem in cluster_stems:
+                # Same cluster — normal edge
+                edge = tuple(sorted([nid, rel_nid]))
+                if edge not in explicit_edges:
+                    explicit_edges.add(edge)
+                    lines.append(f"    {nid} --- {rel_nid}")
+            else:
+                # Cross-cluster — stub edge
+                rel_cluster = all_clusters.get(rel_stem, "work")
+                rel_title = rel["meta"].get("title", rel_stem)
+                stub_id = get_stub(rel_cluster, rel_stem, rel_title)
+                edge = tuple(sorted([nid, stub_id]))
+                if edge not in explicit_edges:
+                    explicit_edges.add(edge)
+                    lines.append(f"    {nid} --- {stub_id}")
+
+    # Tag-based edges (within cluster only)
+    tag_edges = set()
+    for tag, tag_ents in tag_entries.items():
+        in_cluster = [e for e in tag_ents if e["path"].stem in cluster_stems]
+        if len(in_cluster) < 2:
+            continue
+        for i in range(len(in_cluster)):
+            for j in range(i + 1, len(in_cluster)):
+                a = node_ids.get(in_cluster[i]["path"].stem)
+                b = node_ids.get(in_cluster[j]["path"].stem)
+                if a and b and a != b:
+                    edge = tuple(sorted([a, b]))
+                    if edge not in explicit_edges and edge not in tag_edges:
+                        tag_edges.add(edge)
+                        lines.append(f"    {a} -.- {b}")
+
+    return lines, len(explicit_edges), len(tag_edges)
+
+
 def cmd_graph(args):
     """Generate a knowledge graph as a mermaid diagram."""
+    split = getattr(args, "split", False)
     entries = find_entries(include_journal=True)
     if not entries:
         print("No entries to graph.")
@@ -783,7 +915,7 @@ def cmd_graph(args):
 
     relations = resolve_related(entries)
 
-    # Build tag co-occurrence edges (entries sharing tags are connected)
+    # Build tag co-occurrence index
     tag_entries = {}
     for e in entries:
         tags = e["meta"].get("tags", [])
@@ -792,85 +924,21 @@ def cmd_graph(args):
         for tag in tags:
             tag_entries.setdefault(tag.lower(), []).append(e)
 
-    # Node styling by type
-    type_shapes = {
-        "stuck": ("{{", "}}"),     # diamond-ish
-        "decision": ("[[", "]]"),  # subroutine
-        "insight": ("(", ")"),     # rounded
-        "session": ("[", "]"),     # rectangle
-        "note": ("([", "])"),      # stadium
-        "reflection": (">", "]"),  # asymmetric
-    }
-
-    lines = ["graph LR"]
-
-    # Define nodes
+    # Assign global node IDs
     node_ids = {}
     for i, e in enumerate(entries):
-        nid = f"e{i}"
-        node_ids[e["path"].stem] = nid
-        meta = e["meta"]
-        title = meta.get("title", e["path"].stem)
-        # Truncate long titles
-        if len(title) > 40:
-            title = title[:37] + "..."
-        # Escape quotes for mermaid
-        title = title.replace('"', "'")
-        t = meta.get("type", "note")
-        l, r = type_shapes.get(t, ("[", "]"))
-        lines.append(f"    {nid}{l}\"{title}\"{r}")
+        node_ids[e["path"].stem] = f"e{i}"
 
-    lines.append("")
+    type_shapes = {
+        "stuck": ("{{", "}}"),
+        "decision": ("[[", "]]"),
+        "insight": ("(", ")"),
+        "session": ("[", "]"),
+        "note": ("([", "])"),
+        "reflection": (">", "]"),
+    }
 
-    # Explicit related edges
-    explicit_edges = set()
-    for e in entries:
-        stem = e["path"].stem
-        nid = node_ids.get(stem)
-        if not nid:
-            continue
-        for rel in relations.get(stem, []):
-            rel_nid = node_ids.get(rel["path"].stem)
-            if rel_nid and nid != rel_nid:
-                edge = tuple(sorted([nid, rel_nid]))
-                if edge not in explicit_edges:
-                    explicit_edges.add(edge)
-                    lines.append(f"    {nid} --- {rel_nid}")
-
-    # Tag-based edges (entries sharing a tag)
-    tag_edges = set()
-    for tag, tag_ents in tag_entries.items():
-        if len(tag_ents) < 2:
-            continue
-        for i in range(len(tag_ents)):
-            for j in range(i + 1, len(tag_ents)):
-                a = node_ids.get(tag_ents[i]["path"].stem)
-                b = node_ids.get(tag_ents[j]["path"].stem)
-                if a and b and a != b:
-                    edge = tuple(sorted([a, b]))
-                    if edge not in explicit_edges and edge not in tag_edges:
-                        tag_edges.add(edge)
-                        lines.append(f"    {a} -.- {b}")
-
-    # Write GRAPH.md
-    graph_content = [
-        "# Knowledge Graph",
-        "",
-        f"*Auto-generated on {datetime.now().strftime('%Y-%m-%d %H:%M')} "
-        f"— {len(entries)} entries, "
-        f"{len(explicit_edges)} direct links, "
-        f"{len(tag_edges)} shared-tag connections.*",
-        "",
-        "Solid lines = explicit `related` links. Dotted lines = shared tags.",
-        "",
-        "```mermaid",
-    ]
-    graph_content.extend(lines)
-    graph_content.append("```")
-    graph_content.append("")
-
-    # Legend
-    graph_content.extend([
+    legend_lines = [
         "## Legend",
         "",
         "| Shape | Type |",
@@ -881,15 +949,148 @@ def cmd_graph(args):
         "| `[ ]` | session |",
         "| `([ ])` | note |",
         "| `> ]` | reflection |",
+        "| `[[ → ]]` | cross-cluster pointer |",
+        "",
+    ]
+
+    if not split:
+        # Original behavior: single GRAPH.md
+        lines = ["graph LR"]
+        for e in entries:
+            nid = node_ids[e["path"].stem]
+            meta = e["meta"]
+            title = meta.get("title", e["path"].stem)
+            if len(title) > 40:
+                title = title[:37] + "..."
+            title = title.replace('"', "'")
+            t = meta.get("type", "note")
+            l, r = type_shapes.get(t, ("[", "]"))
+            lines.append(f"    {nid}{l}\"{title}\"{r}")
+        lines.append("")
+
+        explicit_edges = set()
+        for e in entries:
+            stem = e["path"].stem
+            nid = node_ids.get(stem)
+            if not nid:
+                continue
+            for rel in relations.get(stem, []):
+                rel_nid = node_ids.get(rel["path"].stem)
+                if rel_nid and nid != rel_nid:
+                    edge = tuple(sorted([nid, rel_nid]))
+                    if edge not in explicit_edges:
+                        explicit_edges.add(edge)
+                        lines.append(f"    {nid} --- {rel_nid}")
+
+        tag_edges = set()
+        for tag, tag_ents in tag_entries.items():
+            if len(tag_ents) < 2:
+                continue
+            for i in range(len(tag_ents)):
+                for j in range(i + 1, len(tag_ents)):
+                    a = node_ids.get(tag_ents[i]["path"].stem)
+                    b = node_ids.get(tag_ents[j]["path"].stem)
+                    if a and b and a != b:
+                        edge = tuple(sorted([a, b]))
+                        if edge not in explicit_edges and edge not in tag_edges:
+                            tag_edges.add(edge)
+                            lines.append(f"    {a} -.- {b}")
+
+        graph_content = [
+            "# Knowledge Graph",
+            "",
+            f"*Auto-generated on {datetime.now().strftime('%Y-%m-%d %H:%M')} "
+            f"— {len(entries)} entries, "
+            f"{len(explicit_edges)} direct links, "
+            f"{len(tag_edges)} shared-tag connections.*",
+            "",
+            "Solid lines = explicit `related` links. Dotted lines = shared tags.",
+            "",
+            "```mermaid",
+        ]
+        graph_content.extend(lines)
+        graph_content.append("```")
+        graph_content.append("")
+        graph_content.extend(legend_lines)
+
+        graph_path = DATA_DIR / "GRAPH.md"
+        graph_path.write_text("\n".join(graph_content) + "\n")
+        print(f"  {c(green, 'Graph built')}: {len(entries)} entries, "
+              f"{len(explicit_edges)} direct + {len(tag_edges)} tag edges")
+        print(f"  {c(dim, str(graph_path))}")
+        return
+
+    # --- Split mode: three theme files ---
+    all_clusters = {e["path"].stem: get_cluster(e) for e in entries}
+    cluster_groups = {"self": [], "world": [], "work": []}
+    for e in entries:
+        cluster_groups[all_clusters[e["path"].stem]].append(e)
+
+    cluster_meta = {
+        "self": "Presence, selfhood, continuity, language, memory — phenomenological nodes",
+        "world": "School knowledge, history, science, literature — external reality",
+        "work": "ai-journal system, experiments, projects",
+    }
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    index_rows = []
+    total_direct = total_tag = 0
+
+    for cluster_name, cluster_entries in cluster_groups.items():
+        if not cluster_entries:
+            continue
+
+        lines, n_direct, n_tag = _build_graph_lines(
+            cluster_entries, node_ids, relations, tag_entries,
+            cluster_name, all_clusters,
+        )
+        total_direct += n_direct
+        total_tag += n_tag
+
+        graph_content = [
+            f"# Knowledge Graph — {cluster_name.title()}",
+            "",
+            f"*{cluster_meta[cluster_name]}*",
+            "",
+            f"*Auto-generated {now_str} — {len(cluster_entries)} entries, "
+            f"{n_direct} direct links, {n_tag} shared-tag connections.*",
+            "",
+            "Solid lines = explicit `related` links. Dotted lines = shared tags. "
+            "`→ GRAPH-X.md` = cross-cluster bridge.",
+            "",
+            "```mermaid",
+        ]
+        graph_content.extend(lines)
+        graph_content.append("```")
+        graph_content.append("")
+        graph_content.extend(legend_lines)
+
+        out_path = DATA_DIR / f"GRAPH-{cluster_name}.md"
+        out_path.write_text("\n".join(graph_content) + "\n")
+        index_rows.append((cluster_name, len(cluster_entries), n_direct, n_tag))
+        print(f"  {c(green, cluster_name)}: {len(cluster_entries)} entries, "
+              f"{n_direct} direct + {n_tag} tag edges → GRAPH-{cluster_name}.md")
+
+    # Write GRAPH-index.md
+    index_lines = [
+        "# Knowledge Graph — Index",
+        "",
+        f"*Auto-generated {now_str} — {len(entries)} total entries across 3 clusters.*",
+        "",
+        "| Cluster | File | Entries | Description |",
+        "|---------|------|---------|-------------|",
+    ]
+    for name, count, _, _ in index_rows:
+        index_lines.append(
+            f"| **{name}** | [GRAPH-{name}.md](GRAPH-{name}.md) | {count} | {cluster_meta[name]} |"
+        )
+    index_lines.extend([
+        "",
+        "Cross-cluster bridges appear as `→ GRAPH-X.md · Title` stub nodes in each file.",
         "",
     ])
-
-    graph_path = DATA_DIR / "GRAPH.md"
-    graph_path.write_text("\n".join(graph_content) + "\n")
-
-    print(f"  {c(green, 'Graph built')}: {len(entries)} entries, "
-          f"{len(explicit_edges)} direct + {len(tag_edges)} tag edges")
-    print(f"  {c(dim, str(graph_path))}")
+    (DATA_DIR / "GRAPH-index.md").write_text("\n".join(index_lines) + "\n")
+    print(f"  {c(dim, 'Index → GRAPH-index.md')}")
 
 
 # Sections that contain conclusions worth preserving during scrub
@@ -1400,7 +1601,10 @@ def main():
     sub.add_parser("index", help="Rebuild the topic index from tags").set_defaults(func=cmd_index)
 
     # graph
-    sub.add_parser("graph", help="Generate knowledge graph (mermaid)").set_defaults(func=cmd_graph)
+    p_graph = sub.add_parser("graph", help="Generate knowledge graph (mermaid)")
+    p_graph.add_argument("--split", action="store_true",
+                         help="Generate three theme files (self/world/work) instead of one GRAPH.md")
+    p_graph.set_defaults(func=cmd_graph)
 
     # publish
     p_publish = sub.add_parser("publish", help="Publish scope=public entries to the public repo")
