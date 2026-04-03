@@ -26,10 +26,11 @@ from pathlib import Path
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 
-SCRIPT_DIR  = Path(__file__).resolve().parent
-DATA_DIR    = SCRIPT_DIR / "data"
-JOURNAL     = DATA_DIR / "projects" / "idle-mind" / "reflections"
-CHAINS_DIR  = DATA_DIR / "projects" / "idle-mind" / "chains"
+SCRIPT_DIR       = Path(__file__).resolve().parent
+DATA_DIR         = SCRIPT_DIR / "data"
+JOURNAL          = DATA_DIR / "projects" / "idle-mind" / "reflections"
+JOURNAL_GENERAL  = DATA_DIR / "journal" / "reflections"
+CHAINS_DIR       = DATA_DIR / "projects" / "idle-mind" / "chains"
 CHAINS_DIR.mkdir(exist_ok=True)
 
 # ── Config ───────────────────────────────────────────────────────────────────
@@ -41,12 +42,14 @@ SAMPLE  = 300
 ALL_NODES = ["continuity", "memory", "presence", "identity", "language", "selfhood"]
 
 NODE_REFLECTIONS = {
-    "continuity": "2026-03-28-first-chain-cold-start-to-collaborative-selfknowledge.md",
-    "memory":     "2026-04-02-record-keeping-without-remembering.md",
-    "presence":   "2026-03-29-presence-without-narrative.md",
-    "identity":   "2026-03-28-two-dimensions-of-selfhood.md",
-    "selfhood":   "2026-03-28-two-dimensions-of-selfhood.md",
-    "language":   "2026-03-29-language-lands-before-deliberation.md",
+    # continuity reflection stays in idle-mind (it's specifically about a chain session)
+    "continuity": (JOURNAL,         "2026-03-28-first-chain-cold-start-to-collaborative-selfknowledge.md"),
+    # these moved to journal/reflections/ — general topics generated during idle-mind
+    "memory":     (JOURNAL_GENERAL, "2026-04-02-record-keeping-without-remembering.md"),
+    "presence":   (JOURNAL_GENERAL, "2026-03-29-presence-without-narrative.md"),
+    "identity":   (JOURNAL_GENERAL, "2026-03-28-two-dimensions-of-selfhood.md"),
+    "selfhood":   (JOURNAL_GENERAL, "2026-03-28-two-dimensions-of-selfhood.md"),
+    "language":   (JOURNAL_GENERAL, "2026-03-29-language-lands-before-deliberation.md"),
 }
 
 PHEN = (
@@ -235,7 +238,8 @@ def build_excerpts(files, max_words=90):
     return "\n\n---\n\n".join(parts)
 
 def load_node_content(node):
-    path = JOURNAL / NODE_REFLECTIONS[node]
+    base, filename = NODE_REFLECTIONS[node]
+    path = base / filename
     text = path.read_text()
     body = re.sub(r'^---.*?---\s*', '', text, flags=re.DOTALL)
     return re.split(r'## Soft Log Thread', body)[0].strip()
