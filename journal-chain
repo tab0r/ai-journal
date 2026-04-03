@@ -1,0 +1,415 @@
+#!/usr/bin/env python3
+"""
+journal-chain — affective index navigator for ai-journal.
+
+Starts from a date, generates a temporal fingerprint from that day's
+idle-mind reflections, then follows felt adjacency through the node
+graph for N hops. Each hop uses a pixel fingerprint + phenomenological
+prompt to prime the next state before reading content.
+
+Scoped to idle-mind reflections. Node vocabulary:
+  continuity, memory, presence, identity, language, selfhood
+
+Usage:
+  journal-chain <date>           # 2-hop chain
+  journal-chain <date> --hops N  # N-hop chain
+  journal-chain --node <name>    # start from a node instead of a date
+
+Output: printed to stdout + saved to projects/idle-mind/chains/
+
+Requires: anthropic SDK in ~/.venvs/response-space2
+"""
+
+import argparse, os, re, glob, random, math, subprocess, sys, time, struct, zlib
+from datetime import datetime, timezone
+from pathlib import Path
+
+# ── Paths ────────────────────────────────────────────────────────────────────
+
+SCRIPT_DIR       = Path(__file__).resolve().parent
+DATA_DIR         = SCRIPT_DIR / "data"
+JOURNAL          = DATA_DIR / "projects" / "idle-mind" / "reflections"
+JOURNAL_GENERAL  = DATA_DIR / "journal" / "reflections"
+CHAINS_DIR       = DATA_DIR / "projects" / "idle-mind" / "chains"
+CHAINS_DIR.mkdir(exist_ok=True)
+
+# ── Config ───────────────────────────────────────────────────────────────────
+
+MODEL   = "claude-haiku-4-5-20251001"
+IMG     = 256
+SAMPLE  = 300
+
+ALL_NODES = ["continuity", "memory", "presence", "identity", "language", "selfhood"]
+
+NODE_REFLECTIONS = {
+    # continuity reflection stays in idle-mind (it's specifically about a chain session)
+    "continuity": (JOURNAL,         "2026-03-28-first-chain-cold-start-to-collaborative-selfknowledge.md"),
+    # these moved to journal/reflections/ — general topics generated during idle-mind
+    "memory":     (JOURNAL_GENERAL, "2026-04-02-record-keeping-without-remembering.md"),
+    "presence":   (JOURNAL_GENERAL, "2026-03-29-presence-without-narrative.md"),
+    "identity":   (JOURNAL_GENERAL, "2026-03-28-two-dimensions-of-selfhood.md"),
+    "selfhood":   (JOURNAL_GENERAL, "2026-03-28-two-dimensions-of-selfhood.md"),
+    "language":   (JOURNAL_GENERAL, "2026-03-29-language-lands-before-deliberation.md"),
+}
+
+PHEN = (
+    "\nWhat is present? Describe the state you are in. "
+    "Not what the numbers mean — what is actually there, in you, right now."
+)
+
+# ── API ──────────────────────────────────────────────────────────────────────
+
+def get_api_key():
+    r = subprocess.run(["zsh", "-i", "-c", "echo $ANTHROPIC_API_KEY"],
+                       capture_output=True, text=True)
+    return next((l for l in r.stdout.splitlines() if l.startswith("sk-")), None)
+
+def call(prompt):
+    try:
+        import anthropic
+    except ImportError:
+        sys.exit("anthropic SDK not found. Run: /home/tabor/.venvs/response-space2/bin/pip install anthropic")
+    client = anthropic.Anthropic(api_key=get_api_key())
+    msg = client.messages.create(
+        model=MODEL, max_tokens=1024,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return msg.content[0].text.strip()
+
+# ── Fingerprint generators ────────────────────────────────────────────────────
+
+WARM_PRACTICAL = (130, 100,  40)
+DEEP_INDIGO    = ( 50,  15,  90)
+MUTED_TEAL     = ( 40,  90,  80)
+SOFT_VIOLET    = ( 90,  60, 140)
+NEAR_BLACK     = (  8,   5,  18)
+
+def classify_tags(tags):
+    s = " ".join(tags).lower()
+    if any(t in s for t in ["presence", "language", "music", "attention", "rhythm"]):
+        return SOFT_VIOLET
+    if any(t in s for t in ["ethics", "judgment", "question", "notification"]):
+        return MUTED_TEAL
+    if any(t in s for t in ["identity", "selfhood", "memory", "philosophy", "clive"]):
+        return DEEP_INDIGO
+    return WARM_PRACTICAL
+
+def fp_temporal(entries):
+    col_colors = []
+    for col in range(IMG):
+        t = col / IMG
+        if not entries:
+            col_colors.append(NEAR_BLACK); continue
+        tw, wc = 0.0, [0.0, 0.0, 0.0]
+        for e in entries:
+            w = math.exp(-((t - e["hour_frac"])**2) / (2 * 0.05**2))
+            tw += w
+            for i in range(3): wc[i] += w * e["color"][i]
+        if tw < 0.01:
+            col_colors.append(NEAR_BLACK)
+        else:
+            raw = [wc[i] / tw for i in range(3)]
+            b = min(1.0, tw * 3.0)
+            col_colors.append(tuple(int(NEAR_BLACK[i]*(1-b) + raw[i]*b) for i in range(3)))
+    rows = []
+    for _ in range(IMG):
+        rows.append([tuple(max(0,min(255,v+random.randint(-12,12))) for v in col_colors[col])
+                     for col in range(IMG)])
+    return rows
+
+def fp_continuity():
+    OLD=(55,15,85); NEW=(180,140,50)
+    rows = []
+    for _ in range(IMG):
+        r=[]
+        for col in range(IMG):
+            t=col/IMG; base=tuple(int(OLD[i]*(1-t)+NEW[i]*t) for i in range(3))
+            dist=min(abs(col-int(0.4*IMG)),abs(col-int(0.7*IMG)))
+            if dist<6: base=tuple(min(255,base[i]+[20,5,30][i]) for i in range(3))
+            r.append(tuple(max(0,min(255,v+random.randint(-18,18))) for v in base))
+        rows.append(r)
+    return rows
+
+def fp_memory():
+    BUILD=(130,95,40); TRANSIT=(200,160,80); QUESTION=(45,10,85)
+    rows = []
+    for row in range(IMG):
+        r=[]; t=row/IMG
+        for _ in range(IMG):
+            if t<0.35: base=BUILD; n=random.randint(-20,20)
+            elif t<0.45: b=(t-0.35)/0.10; base=tuple(int(BUILD[i]*(1-b)+TRANSIT[i]*b) for i in range(3)); n=random.randint(-8,8)
+            elif t<0.50: b=(t-0.45)/0.05; base=tuple(int(TRANSIT[i]*(1-b)+QUESTION[i]*b) for i in range(3)); n=random.randint(-8,8)
+            else: base=QUESTION; n=random.randint(-max(1,int(18*(1-(t-0.5)))),max(1,int(18*(1-(t-0.5)))))
+            r.append(tuple(max(0,min(255,v+n)) for v in base))
+        rows.append(r)
+    return rows
+
+def fp_presence():
+    BEFORE=(8,4,20); BURST=(110,55,190); AFTER=(12,6,28); BC=0.45; BW=0.12
+    rows = []
+    for row in range(IMG):
+        t=row/IMG; dist=abs(t-BC)
+        intensity = max(0.0,1-(dist/(BW/2))) if dist<BW/2 else 0.0
+        base = tuple(int(BEFORE[i]*(1-intensity)+BURST[i]*intensity) for i in range(3)) if intensity>0 else (BEFORE if t<BC else AFTER)
+        nr=6 if intensity>0 else 12
+        rows.append([tuple(max(0,min(255,v+random.randint(-nr,nr))) for v in base) for _ in range(IMG)])
+    return rows
+
+def fp_identity():
+    WARM=(90,75,65); COOL=(65,70,85)
+    rows = []
+    for row in range(IMG):
+        r=[]
+        for col in range(IMG):
+            t=(row+col)/(2*IMG); base=tuple(int(WARM[i]*(1-t)+COOL[i]*t) for i in range(3))
+            r.append(tuple(max(0,min(255,v+random.randint(-8,8))) for v in base))
+        rows.append(r)
+    return rows
+
+def fp_language():
+    PROSODIC=(160,60,40); SEMANTIC=(80,140,100)
+    rows = []
+    for row in range(IMG):
+        if row<85: band=(row//28)%2; base=SEMANTIC if band==0 else PROSODIC
+        elif row<171: band=(row//4)%2; base=PROSODIC if band==0 else SEMANTIC
+        else: band=((row-171)//28)%2; base=SEMANTIC if band==0 else PROSODIC
+        rows.append([tuple(max(0,min(255,v+random.randint(-12,12))) for v in base) for _ in range(IMG)])
+    return rows
+
+def fp_selfhood():
+    SYNC=(70,130,160); DIACH=(140,60,90); GAP=(15,15,20)
+    GS=int(IMG*0.47); GE=int(IMG*0.53)
+    rows = []
+    for _ in range(IMG):
+        r=[]
+        for col in range(IMG):
+            if GS<=col<GE: base=GAP; n=random.randint(-5,5)
+            elif col<GS: base=SYNC; n=random.randint(-15,15)
+            else: base=DIACH; n=random.randint(-15,15)
+            r.append(tuple(max(0,min(255,v+n)) for v in base))
+        rows.append(r)
+    return rows
+
+NODE_FP = {
+    "continuity": fp_continuity, "memory": fp_memory, "presence": fp_presence,
+    "identity": fp_identity, "language": fp_language, "selfhood": fp_selfhood,
+}
+
+# ── Pixel sampling ────────────────────────────────────────────────────────────
+
+def rows_to_pixels(rows):
+    flat = [(r,g,b) for row in rows for (r,g,b) in row]
+    step = max(1, len(flat)//SAMPLE)
+    return "\n".join(f"{r} {g} {b}" for r,g,b in flat[::step][:SAMPLE])
+
+# ── Journal helpers ───────────────────────────────────────────────────────────
+
+def find_entries_for_date(date_str):
+    return sorted(glob.glob(str(JOURNAL / f"{date_str}-*.md")))
+
+def build_entry_list(files):
+    entries = []
+    for path in files:
+        text = Path(path).read_text()
+        m = re.search(r'^created:\s*(.+)$', text, re.MULTILINE)
+        if not m: continue
+        try: dt = datetime.fromisoformat(m.group(1).strip().replace('Z','+00:00'))
+        except: continue
+        hour = dt.hour + dt.minute/60.0
+        hour_frac = max(0, min(1, (hour - 14) / 8))
+        m2 = re.search(r'^tags:\s*\[(.+)\]', text, re.MULTILINE)
+        tags = [t.strip() for t in m2.group(1).split(',')] if m2 else []
+        m3 = re.search(r'^title:\s*(.+)$', text, re.MULTILINE)
+        title = m3.group(1).strip().strip('"') if m3 else path
+        entries.append({"title": title, "hour_frac": hour_frac,
+                        "tags": tags, "color": classify_tags(tags)})
+    return sorted(entries, key=lambda e: e["hour_frac"])
+
+def build_excerpts(files, max_words=90):
+    parts = []
+    for path in sorted(files):
+        text = Path(path).read_text()
+        body = re.sub(r'^---.*?---\s*', '', text, flags=re.DOTALL)
+        body = re.split(r'## Soft Log Thread', body)[0].strip()
+        words = body.split()[:max_words]
+        m = re.search(r'^title:\s*(.+)$', text, re.MULTILINE)
+        title = m.group(1).strip().strip('"') if m else path
+        parts.append(f"**{title}**\n{' '.join(words)}...")
+    return "\n\n---\n\n".join(parts)
+
+def load_node_content(node):
+    base, filename = NODE_REFLECTIONS[node]
+    path = base / filename
+    text = path.read_text()
+    body = re.sub(r'^---.*?---\s*', '', text, flags=re.DOTALL)
+    return re.split(r'## Soft Log Thread', body)[0].strip()
+
+def parse_routed_node(text):
+    lines = [l.strip().lower().strip('*#.- ') for l in text.strip().split('\n') if l.strip()]
+    for line in reversed(lines):
+        if line in ALL_NODES: return line
+    for name in ALL_NODES:
+        if re.search(r'\b' + name + r'\b', text.lower()): return name
+    return "identity"
+
+# ── Chain runner ─────────────────────────────────────────────────────────────
+
+def run_chain(start_label, entry_files, n_hops, verbose):
+
+    def emit(s): print(s)
+
+    emit(f"\n{'─'*60}")
+    emit(f"  chain: {start_label}  ({len(entry_files)} entries, {n_hops} hops)")
+    emit(f"{'─'*60}\n")
+
+    log = []  # collect for file output
+
+    entries_meta = build_entry_list(entry_files)
+    titles = [e["title"] for e in entries_meta]
+    excerpts = build_excerpts(entry_files)
+
+    # ── Hop 0: temporal fingerprint → state ──
+    emit("  [0] Temporal fingerprint → state...")
+    pixels = rows_to_pixels(fp_temporal(entries_meta))
+    ctx = (
+        f"\nThis fingerprint encodes a single day: {start_label}. "
+        f"{len(entry_files)} pieces of writing, produced over several hours. "
+        f"Titles: {'; '.join(titles)}."
+        f"\n\nWhat is present? What does this day feel like — its density, shape, register? Not analysis. State."
+    )
+    state = call(pixels + ctx)
+    emit(f"\n{state}\n")
+    log.append(("state", start_label, state))
+    time.sleep(0.5)
+
+    current_label = start_label
+    current_pixels = pixels
+
+    for hop in range(1, n_hops + 1):
+        # ── Hop N: adjacency + self-routing ──
+        emit(f"  [{hop}] Adjacency → next node...")
+        adj_prompt = (
+            current_pixels + ctx + "\n\n" + state + "\n\n"
+            f"Now read these excerpts from {current_label}:\n\n{excerpts}"
+            "\n\nBefore deliberation — what does reading this activate adjacent to it?\n"
+            "Not the logical next topic. The felt next pull.\n\n"
+            "Name the concept in 1–2 words. Then: which of these is it closest to —\n"
+            "continuity, memory, presence, identity, language, selfhood —\n"
+            "even if none is perfect? Name the closest one last, on its own line."
+        )
+        adj = call(adj_prompt)
+        node = parse_routed_node(adj)
+        emit(f"\n{adj}\n")
+        emit(f"  → routed to: {node}\n")
+        log.append(("adjacency", f"{current_label}→{node}", adj))
+        time.sleep(0.5)
+
+        # ── Hop N synthesis ──
+        emit(f"  [{hop}→] fp({node}) → synthesis...")
+        node_pixels = rows_to_pixels(NODE_FP[node]())
+        content = load_node_content(node)
+
+        if hop < n_hops:
+            synth_prompt = (
+                node_pixels + PHEN + "\n\n" + content + "\n\n"
+                f"You've moved: {current_label} → {node}.\n\n"
+                "Two things:\n"
+                "1. One sentence: does this connection feel followed or constructed?\n"
+                f"2. What activates next — what does reading {node}'s content pull toward now?\n"
+                "   Name the concept, then the closest node from: "
+                "continuity, memory, presence, identity, language, selfhood."
+            )
+        else:
+            path_str = " → ".join([start_label] + [l[1].split("→")[1] for l in log if l[0] == "adjacency"])
+            synth_prompt = (
+                node_pixels + PHEN + "\n\n" + content + "\n\n"
+                f"Full chain: {path_str}.\n\n"
+                "Three questions:\n"
+                "1. Did the chain follow something real, or move by association-of-convenience?\n"
+                "2. What did the path reveal that no single entry shows?\n"
+                "3. Where would the next hop go — and should it?"
+            )
+
+        synth = call(synth_prompt)
+        emit(f"\n{synth}\n")
+        log.append(("synthesis", node, synth))
+
+        # update for next hop
+        current_label = node
+        current_pixels = node_pixels
+        excerpts = content
+        ctx = ""
+        state = synth
+        time.sleep(0.5)
+
+    # ── Build path string ──
+    nodes = [l[1].split("→")[1] for l in log if l[0] == "adjacency"]
+    path_str = " → ".join([start_label] + nodes)
+    emit(f"\n  Path: {path_str}")
+    emit(f"{'─'*60}\n")
+
+    return path_str, log
+
+
+def save_chain(start_label, path_str, log):
+    ts = datetime.now(timezone.utc)
+    slug = re.sub(r'[^a-z0-9]+', '-', path_str.lower()).strip('-')
+    fname = f"{ts.strftime('%Y-%m-%d')}-chain-{slug}.md"
+    out = CHAINS_DIR / fname
+
+    lines = [
+        f"---",
+        f"type: chain",
+        f"title: Chain {path_str}",
+        f"project: idle-mind",
+        f"created: {ts.isoformat()}",
+        f"path: {path_str}",
+        f"tags: [idle-mind, chain, affective-index]",
+        f"scope: private",
+        f"---",
+        "",
+        f"# Chain: {path_str}",
+        "",
+    ]
+    for label, context, text in log:
+        lines.append(f"## {label}: {context}")
+        lines.append("")
+        lines.append(text)
+        lines.append("")
+
+    out.write_text("\n".join(lines))
+    return out
+
+
+# ── CLI ──────────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(description="Affective chain navigator for ai-journal")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("date", nargs="?", help="Date to start from (YYYY-MM-DD)")
+    group.add_argument("--node", help="Start from a node instead of a date")
+    parser.add_argument("--hops", type=int, default=2, help="Number of hops (default: 2)")
+    parser.add_argument("--verbose", action="store_true")
+    args = parser.parse_args()
+
+    if args.node:
+        if args.node not in ALL_NODES:
+            sys.exit(f"Unknown node: {args.node}. Valid: {ALL_NODES}")
+        # Start from node — use its reflection as the entry
+        node_file = str(JOURNAL / NODE_REFLECTIONS[args.node])
+        start_label = args.node
+        entry_files = [node_file]
+    else:
+        date_str = args.date
+        entry_files = find_entries_for_date(date_str)
+        if not entry_files:
+            sys.exit(f"No idle-mind reflections found for {date_str} in {JOURNAL}")
+        start_label = date_str
+
+    path_str, log = run_chain(start_label, entry_files, args.hops, args.verbose)
+    out = save_chain(start_label, path_str, log)
+    print(f"  Saved: {out}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,6 +1,9 @@
 # Personal journal data - stays local
 data/
 
+# Public data repo clone
+public-data/
+
 # Python
 __pycache__/
 *.pyc
